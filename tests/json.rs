@@ -2,7 +2,7 @@
 
 mod support;
 
-use support::{Response, run, with_harness};
+use support::{Response, run, spawn, with_harness};
 
 const ONE: &str = "[[hosts]]\nname = \"node01\"\n";
 const TWO: &str = "[[hosts]]\nname = \"node01\"\n\n[[hosts]]\nname = \"node02\"\n";
@@ -319,7 +319,7 @@ fn a_line_oriented_consumer_sees_results_as_they_settle() {
         cmd.args(["-H", file.to_str().unwrap(), "-f", "2", "--json", "--", "x"]);
         cmd.stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null());
-        let mut child = cmd.spawn().expect("spawn");
+        let mut child = spawn(&mut cmd);
         let mut lines = std::io::BufReader::new(child.stdout.take().unwrap()).lines();
 
         let started = Instant::now();

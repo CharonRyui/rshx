@@ -10,7 +10,7 @@ use std::io::{BufRead, BufReader};
 use std::process::{Child, Stdio};
 use std::time::{Duration, Instant};
 
-use support::{Response, run, with_harness};
+use support::{Response, run, spawn, with_harness};
 
 const THREE: &str = "[[hosts]]\nname = \"node01\"\n\n[[hosts]]\nname = \"node02\"\n\n[[hosts]]\nname = \"node03\"\n";
 
@@ -28,7 +28,7 @@ fn start(harness: &support::Harness, flags: &[&str]) -> Child {
     cmd.args(flags);
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
     std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
-    cmd.spawn().expect("spawn rshx")
+    spawn(&mut cmd)
 }
 
 /// Waits until `predicate` holds, or fails. Interrupts are asynchronous, so a
@@ -201,13 +201,19 @@ fn hosts_that_already_settled_keep_their_real_status() {
         let (code, stdout, stderr) = collect(child);
 
         assert_eq!(code, 99, "{stderr}");
+        // The duration is formatting, not contract: under load this Host takes
+        // a tenth of a second rather than none, and the test must not care.
+        let settled = stdout
+            .lines()
+            .find(|line| line.starts_with("node01"))
+            .unwrap_or_else(|| panic!("node01 has a result line: {stdout:?}"));
         assert!(
-            stdout.contains("node01 ok"),
+            settled.contains(" ok "),
             "a settled Host keeps its status: {stdout:?}"
         );
         assert!(
-            stdout.contains("node01 ok 0.0") && stdout.contains("done"),
-            "and its output: {stdout:?}"
+            settled.ends_with("done"),
+            "and its output, folded onto the same line: {stdout:?}"
         );
         assert!(
             stdout.contains("node02 cancelled") && stdout.contains("node03 cancelled"),

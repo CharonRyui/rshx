@@ -11,11 +11,45 @@
 use std::fs;
 use std::os::fd::FromRawFd;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Child, Command, Output, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
+
+/// Held while an executable is written, and while a process is spawned.
+///
+/// A forked child holds a copy of every descriptor this process has open until
+/// it reaches `exec`, including a descriptor another thread is writing the fake
+/// ssh with. `exec` of a file that still has an open write descriptor fails
+/// with `ETXTBSY`, so a spawn overlapping a stub write fails for a reason that
+/// has nothing to do with the test. Both sides take this lock; it is held only
+/// across the fork and the write, never while a child runs.
+static EXEC_LOCK: Mutex<()> = Mutex::new(());
+
+/// The exec lock, ignoring poisoning: a test that panicked mid-spawn must not
+/// take every other test down with it.
+fn exec_lock() -> MutexGuard<'static, ()> {
+    EXEC_LOCK.lock().unwrap_or_else(|err| err.into_inner())
+}
+
+/// Spawns a command, holding the exec lock across the fork. Use this instead
+/// of `Command::spawn` so the fork cannot overlap a write to an executable.
+pub fn spawn(cmd: &mut Command) -> Child {
+    let _guard = exec_lock();
+    cmd.spawn().expect("spawn")
+}
+
+/// Runs a command to completion and captures its output, the way
+/// `Command::output` does, but without holding the exec lock while it runs.
+pub fn output(cmd: &mut Command) -> Output {
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let child = spawn(cmd);
+    child.wait_with_output().expect("wait for the child")
+}
 
 /// What the fake ssh does for one destination.
 #[derive(Clone, Debug)]
@@ -95,10 +129,14 @@ impl Harness {
         fs::create_dir_all(dir.join("xdg")).unwrap();
 
         let stub = dir.join("bin/ssh");
-        fs::write(&stub, STUB).unwrap();
-        let mut perms = fs::metadata(&stub).unwrap().permissions();
-        std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
-        fs::set_permissions(&stub, perms).unwrap();
+        {
+            // Held against a concurrent spawn: see `EXEC_LOCK`.
+            let _guard = exec_lock();
+            fs::write(&stub, STUB).unwrap();
+            let mut perms = fs::metadata(&stub).unwrap().permissions();
+            std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
+            fs::set_permissions(&stub, perms).unwrap();
+        }
 
         Harness { dir }
     }
@@ -187,6 +225,53 @@ impl Harness {
                 }
             })
             .collect()
+    }
+
+    /// Every fake ssh start and end, oldest first.
+    pub fn timeline(&self) -> Vec<Tick> {
+        let mut ticks: Vec<Tick> = self
+            .read_records("timeline")
+            .iter()
+            .filter_map(|line| {
+                let mut fields = line.split(' ');
+                let (Some(kind), Some(at), Some(dest)) =
+                    (fields.next(), fields.next(), fields.next())
+                else {
+                    return None;
+                };
+                let started = match kind {
+                    "start" => true,
+                    "end" => false,
+                    _ => return None,
+                };
+                Some(Tick {
+                    at: at.parse().ok()?,
+                    started,
+                    dest: dest.to_string(),
+                })
+            })
+            .collect();
+        ticks.sort();
+        ticks
+    }
+
+    /// The destinations the fake ssh was started for, in the order it started.
+    pub fn starts(&self) -> Vec<String> {
+        self.timeline()
+            .into_iter()
+            .filter(|tick| tick.started)
+            .map(|tick| tick.dest)
+            .collect()
+    }
+
+    /// When the last fake ssh ended, in nanoseconds since the epoch, on the
+    /// same clock as `SystemTime::now`.
+    pub fn last_end(&self) -> Option<u128> {
+        self.timeline()
+            .iter()
+            .filter(|tick| !tick.started)
+            .map(|tick| tick.at)
+            .max()
     }
 
     /// The highest number of fake ssh processes that were running at once.
@@ -414,6 +499,17 @@ pub struct Process {
     pub sid: i32,
 }
 
+/// One fake ssh start or end, as the harness observed it.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Tick {
+    /// Nanoseconds since the epoch, on the same clock as `SystemTime::now`.
+    pub at: u128,
+    /// True for a start, false for an end. At the same instant an end sorts
+    /// first, so a window boundary is never counted as overlap.
+    pub started: bool,
+    pub dest: String,
+}
+
 /// A summary of the run a test just performed, for assertions that read better
 /// than raw bytes.
 #[derive(Debug)]
@@ -431,11 +527,11 @@ impl Run {
 
 /// Runs a command to completion and captures everything.
 pub fn run(mut cmd: Command) -> Run {
-    let output = cmd.output().expect("spawn");
+    let captured = output(&mut cmd);
     Run {
-        code: output.status.code().expect("process exited normally"),
-        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        code: captured.status.code().expect("process exited normally"),
+        stdout: String::from_utf8_lossy(&captured.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&captured.stderr).into_owned(),
     }
 }
 
@@ -485,7 +581,7 @@ pub fn run_on_tty(mut cmd: Command, attach: Attach) -> Run {
     // The Command owns the parent's copies of the terminal fd, and the read
     // below only ends once every copy is closed. So the Command must be gone
     // before the read starts, not at the end of the function.
-    let mut child = cmd.spawn().expect("spawn");
+    let mut child = spawn(&mut cmd);
     drop(cmd);
 
     // The terminal is drained on its own thread: reading it to EOF needs every
@@ -548,10 +644,13 @@ const STUB: &str = r#"#!/bin/sh
 dir="$RSHX_STUB_DIR"
 
 # The argv of this invocation: one line, fields separated by US (0x1f).
-{
-    for arg in "$@"; do printf '%s\037' "$arg"; done
-    printf '\n'
-} >> "$dir/argv"
+# Built as one string and written once. A printf per field would be a write
+# per field, and concurrent invocations would then interleave inside a record:
+# each write appends atomically, but the record as a whole would not be.
+us=$(printf '\037')
+line=
+for arg in "$@"; do line="$line$arg$us"; done
+printf '%s\n' "$line" >> "$dir/argv"
 
 # The destination is the first argument after `--`, as ssh itself parses it.
 while [ "$#" -gt 0 ]; do
@@ -566,14 +665,18 @@ resp="$dir/resp/$dest"
 delay=$(cat "$resp/delay" 2>/dev/null) || delay=0
 code=$(cat "$resp/code" 2>/dev/null) || code=0
 
-printf 'start %s\n' "$(date +%s%N)" >> "$dir/timeline"
+# When this invocation ran, and for which destination. One write per event, so
+# concurrent invocations never corrupt each other's records. The destination
+# lets a test assert on the order Hosts ran in, which is a structural property:
+# unlike a wall-clock bound, it does not bend when the machine is loaded.
+printf 'start %s %s\n' "$(date +%s%N)" "$dest" >> "$dir/timeline"
 # The pid, its process group and its session, so a test can tell whether rshx
 # gave the child a group of its own.
 printf 'proc %s %s %s\n' "$$" "$(ps -o pgid= -p $$ | tr -d ' ')" "$(ps -o sid= -p $$ | tr -d ' ')" >> "$dir/procs"
 if [ "$delay" != "0" ]; then sleep "$delay"; fi
 [ -f "$resp/out" ] && cat "$resp/out"
 [ -f "$resp/err" ] && cat "$resp/err" >&2
-printf 'end %s\n' "$(date +%s%N)" >> "$dir/timeline"
+printf 'end %s %s\n' "$(date +%s%N)" "$dest" >> "$dir/timeline"
 
 exit "$code"
 "#;

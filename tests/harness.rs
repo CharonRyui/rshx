@@ -6,7 +6,7 @@ mod support;
 
 use std::process::Command;
 
-use support::{Harness, Response, ms, run, with_harness};
+use support::{Harness, Response, ms, run, spawn, with_harness};
 
 #[test]
 fn the_stub_records_its_argv_and_replays_its_script() {
@@ -68,9 +68,8 @@ fn the_stub_reports_overlapping_invocations() {
             let mut cmd = Command::new(harness.stub());
             cmd.args(["--", &format!("node0{i}")])
                 .env("RSHX_STUB_DIR", harness.path())
-                .stdout(std::process::Stdio::null())
-                .spawn()
-                .unwrap()
+                .stdout(std::process::Stdio::null());
+            spawn(&mut cmd)
         })
         .collect();
     for mut child in children {
@@ -94,18 +93,20 @@ fn the_stub_honours_a_per_destination_delay() {
     // Started at the same instant, so finishing order is the delay's doing and
     // nothing else's. A stub that ignored the scripted delay would finish in
     // start order.
-    let mut slow = Command::new(harness.stub())
-        .args(["--", "slow01"])
-        .env("RSHX_STUB_DIR", harness.path())
-        .stdout(std::process::Stdio::piped())
-        .spawn()
-        .unwrap();
-    let mut quick = Command::new(harness.stub())
-        .args(["--", "node01"])
-        .env("RSHX_STUB_DIR", harness.path())
-        .stdout(std::process::Stdio::piped())
-        .spawn()
-        .unwrap();
+    let mut slow = {
+        let mut cmd = Command::new(harness.stub());
+        cmd.args(["--", "slow01"])
+            .env("RSHX_STUB_DIR", harness.path())
+            .stdout(std::process::Stdio::piped());
+        spawn(&mut cmd)
+    };
+    let mut quick = {
+        let mut cmd = Command::new(harness.stub());
+        cmd.args(["--", "node01"])
+            .env("RSHX_STUB_DIR", harness.path())
+            .stdout(std::process::Stdio::piped());
+        spawn(&mut cmd)
+    };
 
     let (out, elapsed) = support::timed(|| {
         use std::io::Read;
@@ -168,6 +169,61 @@ fn the_source_tree_has_no_leftover_placeholder_modules() {
         dirs.is_empty(),
         "src/ holds no subdirectories, only modules: {dirs:?}"
     );
+}
+
+#[test]
+fn every_invocation_is_recorded_as_one_intact_record() {
+    // The stub appends to a shared file, and every other test's evidence is
+    // read back from it. If a record were assembled from several writes,
+    // concurrent invocations would interleave inside one another and a test
+    // could silently read a mangled argv.
+    with_harness(|harness| {
+        harness.respond_default(Response::ok());
+        let hosts: Vec<String> = (1..=32).map(|i| format!("node{i:02}")).collect();
+        let file: String = hosts
+            .iter()
+            .map(|name| format!("[[hosts]]\nname = \"{name}\"\n\n"))
+            .collect();
+        let file = harness.write("hosts.toml", &file);
+
+        let command = ["uptime", "-p", "--since", "1 day ago"];
+        let out = run({
+            let mut cmd = harness.rshx();
+            cmd.args(["-H", file.to_str().unwrap(), "--"]);
+            cmd.args(command);
+            cmd
+        });
+        assert_eq!(out.code, 0, "{}", out.stderr);
+
+        let invocations = harness.invocations();
+        assert_eq!(
+            invocations.len(),
+            hosts.len(),
+            "every Host is recorded once, not merged or dropped: {invocations:?}"
+        );
+        for argv in &invocations {
+            assert_eq!(
+                argv.len(),
+                command.len() + 2,
+                "a record is one invocation, whole: {argv:?}"
+            );
+            assert_eq!(argv[0], "--", "the separator leads the record: {argv:?}");
+            assert!(
+                hosts.contains(&argv[1]),
+                "the destination follows it: {argv:?}"
+            );
+            assert_eq!(
+                &argv[2..],
+                command,
+                "and the command is its own arguments, never joined: {argv:?}"
+            );
+        }
+        let mut seen: Vec<&str> = invocations.iter().map(|argv| argv[1].as_str()).collect();
+        seen.sort();
+        let mut wanted: Vec<&str> = hosts.iter().map(String::as_str).collect();
+        wanted.sort();
+        assert_eq!(seen, wanted, "one record per Host, and no others");
+    });
 }
 
 #[test]

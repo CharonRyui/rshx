@@ -3,8 +3,13 @@
 mod support;
 
 use std::process::Command;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use support::{Attach, Response, run, run_on_tty, screen, with_harness};
+use support::{Attach, Response, run, run_on_tty, screen, spawn, with_harness};
+
+/// How often the heartbeat reports, from `TICK` in `src/heartbeat.rs`. The
+/// crate is a binary, so an integration test cannot import it.
+const HEARTBEAT_TICK: Duration = Duration::from_millis(200);
 
 const SLOW_AND_QUICK: &str = "[[hosts]]\nname = \"slow01\"\n\n[[hosts]]\nname = \"slow02\"\n\n[[hosts]]\nname = \"node01\"\n";
 const ONE_SLOW: &str = "[[hosts]]\nname = \"slow01\"\n";
@@ -257,7 +262,7 @@ fn result_lines_are_intact_when_both_streams_go_to_one_file() {
         // process.
         cmd.stdout(std::process::Stdio::from(handle.try_clone().unwrap()))
             .stderr(std::process::Stdio::from(handle));
-        let mut child = cmd.spawn().expect("spawn");
+        let mut child = spawn(&mut cmd);
         let code = child.wait().expect("wait").code().expect("exited normally");
 
         assert_eq!(
@@ -301,17 +306,28 @@ fn the_heartbeat_does_not_delay_a_run_that_is_already_finished() {
         harness.respond_default(Response::ok());
         let file = harness.write("hosts.toml", SLOW_AND_QUICK);
 
-        let started = std::time::Instant::now();
         let out = run_on_tty(
             on_terminal(harness, &file, &["--", "true"]),
             Attach::STDERR_ONLY,
         );
-        let elapsed = started.elapsed();
 
         assert_eq!(out.code, 0, "{}", out.stderr);
+
+        // Measured from the last Host settling, not from the start of the run:
+        // starting three processes and a terminal is allowed to take a while
+        // on a loaded machine, but once the work is done nothing may sit and
+        // wait for the next tick, and that is a whole TICK away. The stub
+        // timestamps its own exit on the same clock as SystemTime.
+        let settled = harness.last_end().expect("every Host ran");
+        let exited = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("the clock is past the epoch")
+            .as_nanos();
+        let tail = exited.saturating_sub(settled);
         assert!(
-            elapsed < std::time::Duration::from_millis(200),
-            "an instant run does not wait for the first tick: {elapsed:?}"
+            tail < HEARTBEAT_TICK.as_nanos(),
+            "the run ends without waiting for the next tick: it took {tail}ns \
+             after the last Host settled"
         );
     });
 }

@@ -2,7 +2,7 @@
 
 mod support;
 
-use support::{Response, run, with_harness};
+use support::{Response, output, run, with_harness};
 
 /// The argv rshx handed ssh for `name`, with the `-o` options pulled out. The
 /// destination is the argument after `--`, which is where rshx always puts it.
@@ -298,20 +298,17 @@ fn a_host_with_an_override_still_picks_up_the_rest_of_ssh_config() {
     // ssh resolves ProxyJump in preference to ProxyCommand, so the two are
     // exercised on separate Hosts rather than both on one.
     let effective = |host: &str| {
-        let out = std::process::Command::new("ssh")
-            .arg("-F")
-            .arg(&config)
-            .args([
-                "-G",
-                "-o",
-                "HostName=10.0.0.1",
-                "-o",
-                "User=alice",
-                "--",
-                host,
-            ])
-            .output()
-            .expect("ssh -G");
+        let mut cmd = std::process::Command::new("ssh");
+        cmd.arg("-F").arg(&config).args([
+            "-G",
+            "-o",
+            "HostName=10.0.0.1",
+            "-o",
+            "User=alice",
+            "--",
+            host,
+        ]);
+        let out = output(&mut cmd);
         String::from_utf8_lossy(&out.stdout).into_owned()
     };
 

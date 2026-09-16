@@ -85,29 +85,46 @@ fn fanout_one_runs_hosts_strictly_one_at_a_time() {
 fn a_finished_host_is_replaced_immediately() {
     with_harness(|harness| {
         let file = harness.write("hosts.toml", &hosts(&EIGHT));
-        // The first two hosts are slow; the other six are instant. A run that
-        // waited for the slow pair before starting the rest would leave the
-        // window empty in between.
-        for host in ["node01", "node02"] {
-            harness.respond(host, Response::ok().delay_ms(400));
-        }
+        // The window is two wide. One Host holds its slot for 400ms, the other
+        // for 1200ms, and the remaining six are instant. The slot freed at
+        // 400ms has to be refilled then: a run that drained the window before
+        // refilling it would leave that slot idle until 1200ms.
+        harness.respond("node01", Response::ok().delay_ms(400));
+        harness.respond("node02", Response::ok().delay_ms(1200));
         harness.respond_default(Response::ok());
 
-        let (out, elapsed) = timed(|| {
-            run({
-                let mut cmd = harness.rshx();
-                cmd.args(["-H", file.to_str().unwrap(), "-f", "2", "--", "hostname"]);
-                cmd
-            })
+        let out = run({
+            let mut cmd = harness.rshx();
+            cmd.args(["-H", file.to_str().unwrap(), "-f", "2", "--", "hostname"]);
+            cmd
         });
 
         assert_eq!(out.code, 0, "{}", out.stderr);
         assert_eq!(out.stdout_lines().len(), 8);
+
+        // Which Hosts were running at the same time. Asserting on this rather
+        // than on how long the run took keeps the test about the scheduler:
+        // a loaded machine stretches wall-clock time without changing the
+        // order anything ran in.
+        let timeline = harness.timeline();
+        let span = |dest: &str| -> Option<(u128, u128)> {
+            let start = timeline.iter().find(|t| t.started && t.dest == dest)?.at;
+            let end = timeline.iter().find(|t| !t.started && t.dest == dest)?.at;
+            Some((start, end))
+        };
+        let (held_from, held_to) = span("node02").expect("node02 ran");
+        let overlapped: Vec<&str> = EIGHT
+            .iter()
+            .filter(|dest| !matches!(**dest, "node01" | "node02"))
+            .filter(|dest| span(dest).is_some_and(|(from, to)| from < held_to && to > held_from))
+            .copied()
+            .collect();
         assert!(
-            elapsed < ms(900),
-            "the six fast hosts fill the window while the slow two run, took {elapsed:?}"
+            !overlapped.is_empty(),
+            "a Host starts in the slot node01 freed, while node02 still holds \
+             its own: {timeline:?}"
         );
-        assert_eq!(harness.peak_concurrency(), 2);
+        assert_eq!(harness.peak_concurrency(), 2, "and the bound still holds");
     });
 }
 
@@ -146,7 +163,12 @@ fn the_default_fanout_is_thirty_two() {
         let names: Vec<String> = (1..=40).map(|i| format!("node{i:02}")).collect();
         let names: Vec<&str> = names.iter().map(String::as_str).collect();
         let file = harness.write("hosts.toml", &hosts(&names));
-        harness.respond_default(Response::ok().delay_ms(120));
+        // The delay has to outlast the time it takes to fork and exec the
+        // window's worth of ssh children, or the first Host settles before the
+        // thirty-second has started and the window never fills. Measured on a
+        // loaded machine, starting 32 children spreads over ~150ms, so 600ms
+        // leaves room for a machine several times busier than that.
+        harness.respond_default(Response::ok().delay_ms(600));
 
         let (out, elapsed) = timed(|| {
             run({
@@ -163,7 +185,10 @@ fn the_default_fanout_is_thirty_two() {
             32,
             "forty hosts with a default fanout of 32 run in two waves"
         );
-        assert!(elapsed < ms(700), "two waves of 120ms, took {elapsed:?}");
+        assert!(
+            elapsed < ms(2500),
+            "two waves of 600ms, not forty serial, took {elapsed:?}"
+        );
     });
 }
 

@@ -19,6 +19,24 @@ fn rshx(
     cmd
 }
 
+/// A command line with a terminal that can render colour.
+///
+/// `TERM` is pinned rather than inherited, so a colour assertion cannot depend
+/// on the terminal the suite happens to be run from. It matters twice over: a
+/// terminal that cannot render colour switches the colour off, and one that can
+/// switches the heartbeat on. The tests below therefore attach one stream at a
+/// time, so the heartbeat's erase sequences on stderr cannot land on the same
+/// surface as the colour being asserted about.
+fn on_terminal(
+    harness: &support::Harness,
+    file: &std::path::Path,
+    flags: &[&str],
+) -> std::process::Command {
+    let mut cmd = rshx(harness, file, flags);
+    cmd.env("TERM", "xterm-256color");
+    cmd
+}
+
 #[test]
 fn an_ok_host_prints_one_line_and_none_of_its_stdout() {
     with_harness(|harness| {
@@ -302,7 +320,10 @@ fn a_terminal_gets_colour_and_a_pipe_does_not() {
             piped.stdout
         );
 
-        let terminal = run_on_tty(rshx(harness, &file, &["--", "hostname"]), Attach::BOTH);
+        let terminal = run_on_tty(
+            on_terminal(harness, &file, &["--", "hostname"]),
+            Attach::STDOUT_ONLY,
+        );
         assert!(
             terminal.stdout.contains('\u{1b}'),
             "a terminal gets colour under --color auto: {:?}",
@@ -317,16 +338,19 @@ fn no_color_is_honoured_on_a_terminal() {
         harness.respond_default(Response::ok());
         let file = harness.write("hosts.toml", ONE);
 
-        let plain = run_on_tty(rshx(harness, &file, &["--", "hostname"]), Attach::BOTH);
+        let plain = run_on_tty(
+            on_terminal(harness, &file, &["--", "hostname"]),
+            Attach::STDOUT_ONLY,
+        );
         assert!(plain.stdout.contains('\u{1b}'), "{:?}", plain.stdout);
 
         let out = run_on_tty(
             {
-                let mut cmd = rshx(harness, &file, &["--", "hostname"]);
+                let mut cmd = on_terminal(harness, &file, &["--", "hostname"]);
                 cmd.env("NO_COLOR", "1");
                 cmd
             },
-            Attach::BOTH,
+            Attach::STDOUT_ONLY,
         );
         assert!(
             !out.stdout.contains('\u{1b}'),
@@ -343,8 +367,8 @@ fn color_never_removes_colour_on_a_terminal() {
         let file = harness.write("hosts.toml", ONE);
 
         let out = run_on_tty(
-            rshx(harness, &file, &["--color", "never", "--", "hostname"]),
-            Attach::BOTH,
+            on_terminal(harness, &file, &["--color", "never", "--", "hostname"]),
+            Attach::STDOUT_ONLY,
         );
 
         assert_eq!(out.code, 0);
@@ -380,9 +404,9 @@ fn stdout_chrome_is_coloured_on_a_terminal() {
         let file = harness.write("hosts.toml", ONE);
 
         // stdout alone on the terminal, so the escape sequences cannot have
-        // come from the stderr summary.
+        // come from the stderr summary or from the heartbeat.
         let out = run_on_tty(
-            rshx(harness, &file, &["--", "hostname"]),
+            on_terminal(harness, &file, &["--", "hostname"]),
             Attach::STDOUT_ONLY,
         );
 
@@ -409,7 +433,7 @@ fn stdout_and_stderr_are_judged_separately() {
         // stdout is a pipe and stderr is a terminal: the terminal stream is
         // still coloured, which one global answer could not produce.
         let out = run_on_tty(
-            rshx(harness, &file, &["--", "hostname"]),
+            on_terminal(harness, &file, &["--", "hostname"]),
             Attach::STDERR_ONLY,
         );
 
