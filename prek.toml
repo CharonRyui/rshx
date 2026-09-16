@@ -1,0 +1,17 @@
+[[repos]]
+rev = "v1.0"
+repo = "https://github.com/doublify/pre-commit-rust"
+hooks = [{ id = "fmt" }, { id = "cargo-check" }, { id = "clippy" }]
+
+[[repos]]
+repo = "builtin"
+hooks = [
+  { id = "check-json" },
+  { id = "check-toml" },
+  { id = "trailing-whitespace" },
+  { id = "check-yaml" },
+  { id = "end-of-file-fixer" },
+  { id = "check-added-large-files" },
+  { id = "check-json5" },
+  { id = "detect-private-key" }
+]
