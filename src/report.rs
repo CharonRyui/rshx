@@ -65,11 +65,16 @@ pub struct Reporter {
     stderr: AutoStream<std::io::Stderr>,
     detail: Detail,
     format: Format,
+    /// Whether the run's chrome — the heading, and the heartbeat that the
+    /// caller draws — belongs on stderr. True only when stderr is a terminal:
+    /// a redirected stderr is a file that a heading would only pollute, and
+    /// the same rule already governs the heartbeat.
+    chrome: bool,
     styles: Styles,
 }
 
 impl Reporter {
-    pub fn new(when: ColorWhen, detail: Detail, format: Format) -> Reporter {
+    pub fn new(when: ColorWhen, detail: Detail, format: Format, chrome: bool) -> Reporter {
         Reporter {
             // JSON is consumed by a program, so it is never coloured, whatever
             // the terminal it happens to be written to.
@@ -81,8 +86,37 @@ impl Reporter {
             stderr: stream(when, std::io::stderr()),
             detail,
             format,
+            chrome,
             styles: Styles::new(),
         }
+    }
+
+    /// One line naming what is about to run, so the report has a heading.
+    ///
+    /// This is chrome, not report: it goes to stderr, and only when stderr is
+    /// a terminal. It is written before the first Host settles, so it also
+    /// says how many Hosts the run selected — which `-g` can otherwise leave
+    /// unclear until the summary.
+    pub fn heading(&mut self, command: &[String], hosts: usize, fanout: u32) {
+        if !self.chrome {
+            return;
+        }
+        let host_word = if hosts == 1 { "host" } else { "hosts" };
+        // Only worth saying when it is the fanout, not the number of Hosts,
+        // that decides how many run at once.
+        let fanout = if (fanout as usize) < hosts {
+            format!(", fanout {fanout}")
+        } else {
+            String::new()
+        };
+        let mut line = String::new();
+        line.push_str(&self.styles.command.render().to_string());
+        line.push_str(&command.join(" "));
+        line.push_str(&self.styles.command.render_reset().to_string());
+        line.push_str(&self.styles.dim.render().to_string());
+        line.push_str(&format!("  ·  {hosts} {host_word}{fanout}"));
+        line.push_str(&self.styles.dim.render_reset().to_string());
+        let _ = writeln!(self.stderr, "{line}");
     }
 
     /// Prints one Host's result, as soon as that Host settles.
@@ -158,18 +192,48 @@ impl Reporter {
     }
 
     /// The one line that carries a Host's name, status, duration and cause.
+    ///
+    /// Only rshx's own tokens are styled. A Host's output is remote bytes that
+    /// rshx cannot interpret — it may be a log, a diff, or JSON — so it is
+    /// passed through uncoloured, and the report never claims to know what it
+    /// means.
     fn line(&self, outcome: &Outcome) -> String {
-        let style = self.styles.status(outcome.status);
-        let mut line = format!(
-            "{} {}{}{} {:.2}s",
+        let s = &self.styles;
+        let status = outcome.status.as_str();
+        let style = s.status(outcome.status);
+
+        let mut line = String::new();
+        // The name is bold rather than coloured: colour is reserved for what a
+        // Host's outcome *is*, and the name is what it *is called*. Weight
+        // also survives every terminal theme, where a colour may not.
+        line.push_str(&format!(
+            "{}{}{}",
+            s.host.render(),
             outcome.host,
+            s.host.render_reset()
+        ));
+        // Padded to the longest status, so the duration and any folded output
+        // line up into columns however mixed the run's outcomes are. The
+        // padding is part of the styled run, but spaces have no colour, so the
+        // reset lands where the next column starts.
+        line.push_str(&format!(
+            " {}{status:<STATUS_WIDTH$}{}",
             style.render(),
-            outcome.status.as_str(),
             style.render_reset(),
+        ));
+        line.push_str(&format!(
+            " {}{:.2}s{}",
+            s.dim.render(),
             outcome.duration.as_secs_f64(),
-        );
+            s.dim.render_reset()
+        ));
         if let Some(cause) = outcome.cause {
-            line.push_str(&format!(" ({})", cause.as_str()));
+            line.push_str(&format!(
+                " {}({}){}",
+                s.dim.render(),
+                cause.as_str(),
+                s.dim.render_reset()
+            ));
         }
         line
     }
@@ -200,7 +264,8 @@ impl Reporter {
     }
 
     /// The run's outcome. Only the counts carry colour, so the line still
-    /// reads as plain text when it is stripped.
+    /// reads as plain text when it is stripped. The elapsed time is the one
+    /// part a reader almost never needs, so it is the one part that is dimmed.
     fn summary_line(&self, outcomes: &[Outcome], not_started: usize, elapsed: Duration) -> String {
         let total = outcomes.len() + not_started;
         let host_word = if total == 1 { "host" } else { "hosts" };
@@ -227,11 +292,12 @@ impl Reporter {
             parts.push(format!("{not_started} not started"));
         }
 
-        format!(
-            "{total} {host_word}: {} in {:.2}s",
-            parts.join(", "),
-            elapsed.as_secs_f64()
-        )
+        let mut line = format!("{total} {host_word}: {}", parts.join(", "));
+        line.push(' ');
+        line.push_str(&self.styles.dim.render().to_string());
+        line.push_str(&format!("in {:.2}s", elapsed.as_secs_f64()));
+        line.push_str(&self.styles.dim.render_reset().to_string());
+        line
     }
 }
 
@@ -239,13 +305,30 @@ impl Reporter {
 const UNFINISHED_NOTE: &str =
     "cancelled and timeout mean rshx stopped waiting; the remote commands may still be running";
 
+/// The width the status column is padded to: the longest status, so a run with
+/// mixed outcomes still lines its durations and output up. Static, so the
+/// report can be written as Hosts settle rather than buffered to measure them.
+const STATUS_WIDTH: usize = 11; // "unreachable"
+
 /// Colours for the parts of the report that carry meaning.
+///
+/// Colour is reserved for a Host's *outcome*, which is the one thing a reader
+/// scans for; the Host's name is bold instead, and everything secondary is
+/// dimmed. Every styled token is also written as plain text, so the report
+/// never depends on colour to be read.
 struct Styles {
     ok: Style,
     failed: Style,
     unreachable: Style,
     timeout: Style,
     cancelled: Style,
+    /// A Host's name: what it is called, as opposed to how it ended.
+    host: Style,
+    /// The command, in the heading.
+    command: Style,
+    /// Everything a reader only looks at when they need it: a duration, a
+    /// cause, the run's elapsed time.
+    dim: Style,
 }
 
 impl Styles {
@@ -256,6 +339,9 @@ impl Styles {
             unreachable: AnsiColor::Yellow.on_default().bold(),
             timeout: AnsiColor::Magenta.on_default().bold(),
             cancelled: AnsiColor::BrightBlack.on_default(),
+            host: Style::new().bold(),
+            command: Style::new().bold(),
+            dim: Style::new().dimmed(),
         }
     }
 

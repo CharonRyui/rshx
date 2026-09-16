@@ -6,6 +6,7 @@ use support::{Attach, Response, run, run_on_tty, with_harness};
 
 const ONE: &str = "[[hosts]]\nname = \"node01\"\n";
 const TWO: &str = "[[hosts]]\nname = \"node01\"\n\n[[hosts]]\nname = \"node02\"\n";
+const THREE: &str = "[[hosts]]\nname = \"node01\"\n\n[[hosts]]\nname = \"node02\"\n\n[[hosts]]\nname = \"node03\"\n";
 
 /// A command line with the given extra flags.
 fn rshx(
@@ -476,6 +477,83 @@ fn an_empty_stream_does_not_add_a_block() {
             out.stdout_lines().len(),
             1,
             "nothing to show means no extra lines: {:?}",
+            out.stdout
+        );
+    });
+}
+
+#[test]
+fn the_heading_names_the_command_and_only_appears_on_a_terminal() {
+    with_harness(|harness| {
+        harness.respond_default(Response::ok());
+        let file = harness.write("hosts.toml", TWO);
+
+        let terminal = run_on_tty(
+            on_terminal(harness, &file, &["--", "du -hs /data"]),
+            Attach::STDERR_ONLY,
+        );
+        assert!(
+            terminal.stderr.contains("du -hs /data"),
+            "the heading names the command that ran: {:?}",
+            terminal.stderr
+        );
+        assert!(
+            terminal.stderr.contains("2 hosts"),
+            "and how many Hosts it is running on: {:?}",
+            terminal.stderr
+        );
+
+        // Chrome, not report: a redirected stderr is a file nobody is watching,
+        // and stdout must stay one line per Host either way.
+        let piped = run(rshx(harness, &file, &["--", "du -hs /data"]));
+        assert!(
+            !piped.stdout.contains("du -hs /data") && !piped.stderr.contains("du -hs /data"),
+            "a redirected run gets no heading: {:?} / {:?}",
+            piped.stdout,
+            piped.stderr
+        );
+    });
+}
+
+#[test]
+fn a_mixed_run_aligns_the_columns_under_the_longest_status() {
+    with_harness(|harness| {
+        harness.respond("node01", Response::ok());
+        harness.respond("node02", Response::failed(1));
+        harness.respond("node03", Response::unreachable());
+        let file = harness.write("hosts.toml", THREE);
+
+        let out = run(rshx(harness, &file, &["--", "true"]));
+        // A mixed run is a failure, by design: 2 for `failed` | 4 for
+        // `unreachable`.
+        assert_eq!(out.code, 6, "{}", out.stderr);
+
+        // The duration must start in the same column whatever the status is,
+        // so a run with mixed outcomes still reads as a table. Measured from
+        // the status, since the Host names are all the same width here.
+        let starts: Vec<usize> = out
+            .stdout_lines()
+            .iter()
+            // A Host that is not `ok` also prints its stderr as an indented
+            // block; the table is the lines that are not indented.
+            .filter(|line| !line.starts_with(' '))
+            .map(|line| {
+                let status = ["unreachable", "failed", "ok"]
+                    .into_iter()
+                    .find_map(|word| line.find(word))
+                    .unwrap_or_else(|| panic!("no status in {line:?}"));
+                let duration = status + "unreachable".len() + 1;
+                assert!(
+                    line[duration..].starts_with(|c: char| c.is_ascii_digit()),
+                    "the duration follows the padded status in {line:?}"
+                );
+                duration
+            })
+            .collect();
+        assert_eq!(
+            starts,
+            vec![starts[0]; starts.len()],
+            "every duration starts in the same column: {:?}",
             out.stdout
         );
     });

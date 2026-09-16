@@ -21,7 +21,6 @@ pub const TICK: Duration = Duration::from_millis(200);
 /// A one-line summary of a run in progress.
 pub struct Heartbeat {
     bar: ProgressBar,
-    total: usize,
     state: RefCell<State>,
 }
 
@@ -34,27 +33,38 @@ struct State {
 }
 
 impl Heartbeat {
-    /// `json` hides the heartbeat: that mode exists to be parsed, not watched.
-    pub fn new(total: usize, json: bool) -> Heartbeat {
-        let target = if json {
-            ProgressDrawTarget::hidden()
-        } else {
-            // Hides itself when stderr is not a terminal, which is what keeps
-            // a redirected file free of escape sequences.
+    /// `chrome` is false when stderr is not a terminal, or under `--json`:
+    /// there is nobody watching, and a redirected file must stay free of
+    /// escape sequences.
+    pub fn new(total: usize, chrome: bool) -> Heartbeat {
+        let target = if chrome {
             ProgressDrawTarget::stderr()
+        } else {
+            ProgressDrawTarget::hidden()
         };
         let bar = ProgressBar::with_draw_target(Some(total as u64), target);
-        // A bare `{msg}`: without a style of its own the bar would draw
-        // indicatif's default progress bar, with a `{wide_bar}` and a count,
-        // over a line that already says both. The template is a constant that
-        // always parses, so the error arm is unreachable.
-        if let Ok(style) = ProgressStyle::with_template("{msg}") {
-            bar.set_style(style);
+        // A spinner for liveness, then how far the run has got, then a bar for
+        // the proportion, then the one detail a count cannot give: what is
+        // still in flight. The bar takes the width left over, so the line
+        // always fills the terminal and the parts either side of it stay put.
+        if let Ok(style) =
+            ProgressStyle::with_template("{spinner:.cyan} {pos}/{len} done {wide_bar:.green} {msg}")
+        {
+            bar.set_style(
+                style
+                    // The frames of the spinner. Its last character is what
+                    // the finished bar shows, and it is never seen: the
+                    // heartbeat is cleared before the summary.
+                    .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏ ")
+                    // Filled, then the partial cell, then the empty cell, so
+                    // the bar reads as one continuous track rather than a
+                    // block of colour next to a gap.
+                    .progress_chars("━╸─"),
+            );
         }
 
         let heartbeat = Heartbeat {
             bar,
-            total,
             state: RefCell::new(State::default()),
         };
         heartbeat.redraw();
@@ -68,20 +78,30 @@ impl Heartbeat {
     }
 
     /// Records that a Host settled.
+    ///
+    /// The position is set before the message because each setter takes the
+    /// bar's lock, draws, and releases it. The message never mentions the
+    /// count, so the frame between the two is stale, never wrong.
     pub fn finish(&self, outcome: &Outcome) {
-        let mut state = self.state.borrow_mut();
-        state.running.remove(&outcome.host);
-        state.done += 1;
-        let done = state.done;
-        drop(state);
-        self.bar.set_position(done as u64);
+        let done = {
+            let mut state = self.state.borrow_mut();
+            state.running.remove(&outcome.host);
+            state.done += 1;
+            state.done as u64
+        };
+        self.bar.set_position(done);
         self.redraw();
     }
 
     /// Redraws between Hosts settling, so a slow Host's elapsed time still
-    /// moves rather than looking like a hung run.
+    /// moves rather than looking like a hung run. `tick` also advances the
+    /// spinner frame, which is the only part of the line that moves while
+    /// nothing settles — without it a long Host would look like a hung run.
     pub fn tick(&self) {
         self.redraw();
+        // Advances the spinner, not the position: the bar tracks Hosts that
+        // have settled, and nothing else may move it.
+        self.bar.tick();
     }
 
     /// Runs `body` with the heartbeat out of the way, then redraws it.
@@ -100,14 +120,17 @@ impl Heartbeat {
     }
 
     /// The line's text, as it would be drawn.
+    ///
+    /// How far the run has got is the template's `{pos}/{len}`, so the message
+    /// carries only what a count cannot: how much is in flight, and what is
+    /// taking longest. Naming the slowest Host is what tells a reader that a
+    /// run is waiting on one machine rather than on the network.
     fn message(&self) -> String {
         let state = self.state.borrow();
-        let done = state.done;
-        let total = self.total;
         match state.longest_running() {
-            None => format!("{done}/{total} done"),
+            None => String::new(),
             Some((host, elapsed)) => format!(
-                "{done}/{total} done, {} running, {host} {:.1}s",
+                "{} running, {host} {:.1}s",
                 state.running.len(),
                 elapsed.as_secs_f64()
             ),

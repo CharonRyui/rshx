@@ -91,6 +91,12 @@ pub async fn execute(cli: &Cli) -> Result<u8> {
     let total = selected.len();
     let started = Instant::now();
 
+    // Chrome — the heading and the heartbeat — belongs on stderr, and only
+    // when a terminal is watching it: a redirected stderr is a file that
+    // neither should be written into. `--json` exists to be parsed, so it gets
+    // none either.
+    let chrome = !cli.json && std::io::IsTerminal::is_terminal(&std::io::stderr());
+
     let mut reporter = report::Reporter::new(
         cli.color,
         report::Detail {
@@ -102,8 +108,12 @@ pub async fn execute(cli: &Cli) -> Result<u8> {
         } else {
             report::Format::Plain
         },
+        chrome,
     );
-    let heartbeat = Rc::new(Heartbeat::new(total, cli.json));
+    // Before the heartbeat's first draw, so the heading sits above it rather
+    // than being written over by it.
+    reporter.heading(&cli.command, total, cli.fanout);
+    let heartbeat = Rc::new(Heartbeat::new(total, chrome));
     let interrupt = Interrupt::install();
 
     // The pdsh sliding window: at most `fanout` remote commands in flight, and

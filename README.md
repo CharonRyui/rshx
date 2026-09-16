@@ -5,9 +5,10 @@ per-host report.
 
 ```console
 $ rshx -H hosts.toml --stdout -- du -hs /data
-node01 ok 0.31s  42G	/data
-node02 ok 0.28s  38G	/data
-node03 failed 0.12s
+du -hs /data  ·  4 hosts
+node01 ok          0.31s  42G	/data
+node02 ok          0.28s  38G	/data
+node03 failed      0.12s
   du: cannot access '/data': No such file or directory
 node04 unreachable 5.00s (connect)
   ssh: connect to host node04 port 22: Connection timed out
@@ -15,7 +16,8 @@ node04 unreachable 5.00s (connect)
 ```
 
 Each line is one host, and hosts are reported as they settle rather than in
-host-file order.
+host-file order. The status column is padded to the longest status, so a run
+with mixed outcomes still reads as a table rather than as ragged text.
 
 ## Why
 
@@ -149,11 +151,12 @@ reserved and cannot be declared as a group.
 
 ## Output
 
-stdout carries one line per host and nothing else; stderr carries the summary,
-the heartbeat, and the note about unfinished commands. So `rshx … > out`
-captures the results alone, while the summary still reaches your terminal. That
-split is what makes `--json` safe to pipe: stdout stays machine-readable even
-when the run is long enough to draw a heartbeat.
+stdout carries one line per host and nothing else; stderr carries the chrome —
+the heading, the heartbeat, the summary, and the note about unfinished
+commands. So `rshx … > out` captures the results alone, while the progress and
+the summary still reach your terminal. That split is what makes `--json` safe to
+pipe: stdout stays machine-readable even when the run is long enough to draw a
+heartbeat.
 
 By default an `ok` host shows neither stream: its line is the whole result,
 which is what keeps a wide run readable. A host that is not `ok` always shows
@@ -179,8 +182,14 @@ gives plain text while the summary on stderr stays coloured. `NO_COLOR` turns
 colour off under `auto`; it is a default, not an override, so an explicit
 `--color always` still colours. `--color never` is the way to be sure.
 
-A progress heartbeat is drawn on stderr when stderr is a terminal, and only
-then: it is absent from a redirected stderr, and off entirely under `--json`.
+Colour marks a host's **outcome**, which is the one thing a reader scans for:
+green `ok`, red `failed`, yellow `unreachable`, magenta `timeout`, dim
+`cancelled`. Everything secondary — the duration, the cause, the run's elapsed
+time — is dimmed, and the host's name is bold rather than coloured, because the
+name says what a host is *called*, not how it ended. A host's own output is
+never coloured: it is remote bytes rshx cannot interpret, so it is passed
+through as it arrived. Every styled token is also written as plain text, so the
+report never depends on colour to be read.
 
 ### JSON
 
@@ -204,6 +213,30 @@ authentication failure is `unreachable` — the command never ran — not `faile
 | `duration_ms` | How long the host took. |
 | `stdout` / `stderr` | Captured verbatim, as JSON strings. |
 | `truncated` | Whether either stream lost bytes to the cap. |
+
+## Progress
+
+A heartbeat is drawn on stderr while hosts are in flight, and only when stderr
+is a terminal: it is absent from a redirected stderr, and off entirely under
+`--json`. It is one line, redrawn in place, so a long run shows that it is
+alive rather than looking hung:
+
+```console
+$ rshx -H hosts.toml -- du -hs /data
+du -hs /data  ·  200 hosts, fanout 32
+⠸ 95/200 done ━━━━━━━━━━━━━━━━━━━╸───────────────────── 30 running, node096 0.4s
+```
+
+The heading names the command and how many hosts it will run on, which `-g` can
+otherwise leave unclear until the summary; it mentions the fanout only when the
+fanout, rather than the host count, is what limits the run. The bar fills as
+hosts settle, and the spinner is the only part that moves while nothing does.
+Naming the slowest host is what tells you a run is waiting on one machine
+rather than on the network. The line is drawn to the width of the terminal, so
+it never wraps however narrow the window is.
+
+The heartbeat is chrome, not report: it is cleared before the summary, and it
+never touches stdout.
 
 ## Statuses and causes
 
