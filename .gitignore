@@ -1,3 +1,9 @@
+# build
 /target
+
+# config
 rshx.toml
+
+# Agent
 .scratch
+CONTEXT.md
