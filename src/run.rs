@@ -100,7 +100,7 @@ pub async fn execute(cli: &Cli) -> Result<u8> {
     let mut reporter = report::Reporter::new(
         cli.color,
         report::Detail {
-            stdout: cli.stdout,
+            stdout: !cli.quiet,
             stderr: cli.stderr,
         },
         if cli.json {

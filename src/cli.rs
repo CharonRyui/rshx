@@ -28,8 +28,8 @@ pub struct Cli {
 
     /// Show each Host's stdout. Without it, only a Host that is not `ok`
     /// shows its output.
-    #[arg(long)]
-    pub stdout: bool,
+    #[arg(long, short = 'q')]
+    pub quiet: bool,
 
     /// Show the stderr of a Host that is `ok`. A Host that is not `ok` always
     /// shows its stderr.
