@@ -1,4 +1,5 @@
-//! Ticket 11: per-host timeout.
+//! The per-host timeout: `--timeout` bounds how long rshx waits for any one
+//! Host, and only that Host.
 
 mod support;
 

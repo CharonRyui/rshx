@@ -1,8 +1,8 @@
 //! What a run prints: one line per Host, plus a summary of the run.
 //!
-//! Per ADR-0006 stdout carries one line per Host and stderr carries the human
-//! chrome, so the two are coloured independently: stdout is often a pipe while
-//! stderr is a terminal.
+//! stdout carries one line per Host and stderr carries the human chrome, so the
+//! two are coloured independently: stdout is often a pipe while stderr is a
+//! terminal.
 
 use std::io::Write;
 use std::time::Duration;
@@ -37,12 +37,9 @@ fn stream<T: anstream::stream::RawStream>(when: ColorWhen, raw: T) -> AutoStream
 }
 
 /// Which streams the report shows.
-///
-/// The default hides an `ok` Host's output entirely, so a wide run stays one
-/// line per Host. See ADR-0009.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Detail {
-    /// Show stdout. Without it, a Host's stdout is shown only when it is not
+    /// Show stdout. Without it, stdout is shown only for a Host that is not
     /// `ok` — an `ok` Host's output is the thing a wide run must not drown in.
     pub stdout: bool,
     /// Show the stderr of a Host that is `ok`. A Host that is not `ok` always
@@ -50,7 +47,7 @@ pub struct Detail {
     pub stderr: bool,
 }
 
-/// How a Host's result is written. See ADR-0006.
+/// How a Host's result is written.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum Format {
     /// One line per Host, with its output as an indented block.
@@ -65,10 +62,9 @@ pub struct Reporter {
     stderr: AutoStream<std::io::Stderr>,
     detail: Detail,
     format: Format,
-    /// Whether the run's chrome — the heading, and the heartbeat that the
-    /// caller draws — belongs on stderr. True only when stderr is a terminal:
-    /// a redirected stderr is a file that a heading would only pollute, and
-    /// the same rule already governs the heartbeat.
+    /// Whether the run's chrome — the heading, and the heartbeat the caller
+    /// draws — belongs on stderr. True only when stderr is a terminal: a
+    /// redirected stderr is a file a heading would only pollute.
     chrome: bool,
     styles: Styles,
 }
@@ -93,10 +89,10 @@ impl Reporter {
 
     /// One line naming what is about to run, so the report has a heading.
     ///
-    /// This is chrome, not report: it goes to stderr, and only when stderr is
-    /// a terminal. It is written before the first Host settles, so it also
-    /// says how many Hosts the run selected — which `-g` can otherwise leave
-    /// unclear until the summary.
+    /// This is chrome, not report: it goes to stderr, and only when stderr is a
+    /// terminal. Being written before the first Host settles, it also says how
+    /// many Hosts the run selected — which `-g` can otherwise leave unclear
+    /// until the summary.
     pub fn heading(&mut self, command: &[String], hosts: usize, fanout: u32) {
         if !self.chrome {
             return;
@@ -193,10 +189,8 @@ impl Reporter {
 
     /// The one line that carries a Host's name, status, duration and cause.
     ///
-    /// Only rshx's own tokens are styled. A Host's output is remote bytes that
-    /// rshx cannot interpret — it may be a log, a diff, or JSON — so it is
-    /// passed through uncoloured, and the report never claims to know what it
-    /// means.
+    /// Only rshx's own tokens are styled. A Host's output is remote bytes rshx
+    /// cannot interpret, so it is passed through uncoloured.
     fn line(&self, outcome: &Outcome) -> String {
         let s = &self.styles;
         let status = outcome.status.as_str();
@@ -204,8 +198,8 @@ impl Reporter {
 
         let mut line = String::new();
         // The name is bold rather than coloured: colour is reserved for what a
-        // Host's outcome *is*, and the name is what it *is called*. Weight
-        // also survives every terminal theme, where a colour may not.
+        // Host's outcome *is*, the name is what it *is called*, and weight
+        // survives every terminal theme where a colour may not.
         line.push_str(&format!(
             "{}{}{}",
             s.host.render(),
@@ -213,9 +207,8 @@ impl Reporter {
             s.host.render_reset()
         ));
         // Padded to the longest status, so the duration and any folded output
-        // line up into columns however mixed the run's outcomes are. The
-        // padding is part of the styled run, but spaces have no colour, so the
-        // reset lands where the next column starts.
+        // line up into columns however mixed the run's outcomes are. Spaces
+        // have no colour, so the reset lands where the next column starts.
         line.push_str(&format!(
             " {}{status:<STATUS_WIDTH$}{}",
             style.render(),
@@ -246,7 +239,7 @@ impl Reporter {
             self.summary_line(outcomes, not_started, elapsed)
         );
         // A run that was cut short must not read as though the remote work
-        // stopped with it. See ADR-0008.
+        // stopped with it.
         if outcomes
             .iter()
             .any(|outcome| outcome.status.is_unfinished())
@@ -286,8 +279,7 @@ impl Reporter {
             }
         }
         // A Host that never started is not a status: its command never ran.
-        // Saying so is the only way the counts add up to the number of Hosts
-        // the run selected.
+        // Saying so is the only way the counts add up to the Hosts selected.
         if not_started > 0 {
             parts.push(format!("{not_started} not started"));
         }
@@ -312,10 +304,10 @@ const STATUS_WIDTH: usize = 11; // "unreachable"
 
 /// Colours for the parts of the report that carry meaning.
 ///
-/// Colour is reserved for a Host's *outcome*, which is the one thing a reader
-/// scans for; the Host's name is bold instead, and everything secondary is
-/// dimmed. Every styled token is also written as plain text, so the report
-/// never depends on colour to be read.
+/// Colour is reserved for a Host's *outcome*, the one thing a reader scans for;
+/// the Host's name is bold instead, and everything secondary is dimmed. Every
+/// styled token is also written as plain text, so the report never depends on
+/// colour to be read.
 struct Styles {
     ok: Style,
     failed: Style,
@@ -371,7 +363,7 @@ struct JsonLine<'a> {
     duration_ms: u64,
     stdout: std::borrow::Cow<'a, str>,
     stderr: std::borrow::Cow<'a, str>,
-    /// Whether either stream lost bytes to rshx's cap. See ADR-0010.
+    /// Whether either stream lost bytes to rshx's cap.
     truncated: bool,
 }
 

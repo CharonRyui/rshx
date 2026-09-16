@@ -1,4 +1,4 @@
-//! Ticket 10: interrupting a run.
+//! Interrupting a run.
 //!
 //! The interrupt is delivered the way a terminal delivers it: `SIGINT` to
 //! rshx's process group. Because each ssh child is spawned in its own group,

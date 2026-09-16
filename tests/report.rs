@@ -1,4 +1,4 @@
-//! Ticket 07: the readable per-host report.
+//! The readable per-host report: one line per Host, with the chrome on stderr.
 
 mod support;
 

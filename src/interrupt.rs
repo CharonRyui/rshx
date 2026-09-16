@@ -4,7 +4,7 @@
 //! in flight to exit with `SIGTERM`, and gives them a grace period before
 //! `SIGKILL`. A second interrupt skips the grace period. Killing the local ssh
 //! does not stop the remote command, so a Host cut short is `cancelled`, never
-//! `failed`. See ADR-0008.
+//! `failed`.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, MutexGuard};

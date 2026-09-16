@@ -17,7 +17,7 @@ use crate::interrupt::{self, Interrupt};
 use crate::report;
 use crate::{EXIT_FAILED, EXIT_INTERRUPTED, EXIT_OK, EXIT_UNREACHABLE};
 
-/// The terminal outcome of one Host's command. See CONTEXT.md.
+/// The terminal outcome of one Host's command.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Status {
     Ok,
@@ -48,13 +48,13 @@ impl Status {
     }
 
     /// Whether rshx stopped waiting for this Host, rather than learning how
-    /// its command ended. See ADR-0008.
+    /// its command ended.
     pub fn is_unfinished(self) -> bool {
         matches!(self, Status::Timeout | Status::Cancelled)
     }
 
     /// The status ssh's exit status implies, and nothing else: rshx never
-    /// reads output text to decide this. See ADR-0005.
+    /// reads output text to decide this.
     fn from_exit_code(code: i32) -> Status {
         match code {
             0 => Status::Ok,
@@ -73,11 +73,11 @@ pub struct Outcome {
     /// Absent when rshx killed the child, since then there is no exit status.
     pub exit_code: Option<i32>,
     /// A best-effort explanation, inferred from ssh's stderr. It never affects
-    /// `status` or the run's exit code. See ADR-0005.
+    /// `status` or the run's exit code.
     pub cause: Option<Cause>,
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
-    /// Whether rshx dropped bytes past its cap. See ADR-0010.
+    /// Whether rshx dropped bytes past its cap.
     pub stdout_truncated: bool,
     pub stderr_truncated: bool,
     pub duration: Duration,
@@ -91,10 +91,9 @@ pub async fn execute(cli: &Cli) -> Result<u8> {
     let total = selected.len();
     let started = Instant::now();
 
-    // Chrome — the heading and the heartbeat — belongs on stderr, and only
-    // when a terminal is watching it: a redirected stderr is a file that
-    // neither should be written into. `--json` exists to be parsed, so it gets
-    // none either.
+    // Chrome belongs on stderr, and only when a terminal is watching it: a
+    // redirected stderr is a file that must stay free of it, and `--json` is
+    // meant to be parsed.
     let chrome = !cli.json && std::io::IsTerminal::is_terminal(&std::io::stderr());
 
     let mut reporter = report::Reporter::new(
@@ -116,19 +115,17 @@ pub async fn execute(cli: &Cli) -> Result<u8> {
     let heartbeat = Rc::new(Heartbeat::new(total, chrome));
     let interrupt = Interrupt::install();
 
-    // The pdsh sliding window: at most `fanout` remote commands in flight, and
-    // a pending Host takes the place of each one that finishes. Hosts settle
-    // out of order, so each is reported the moment it does.
+    // The pdsh sliding window: at most `fanout` remote commands in flight, each
+    // one that finishes replaced by a pending Host.
     let command = &cli.command;
     let mut settling = stream::iter(selected)
         .map(|host| {
             let interrupt = interrupt.clone();
             let heartbeat = Rc::clone(&heartbeat);
             async move {
-                // Checked here, not when the Host entered the window, so a
-                // Host waiting for a slot does not start after an interrupt.
-                // Hosts that never start are not reported: their command
-                // never ran, and `cancelled` would claim it did.
+                // Checked here, not on entry, so a Host waiting for a slot
+                // does not start after an interrupt. One that never starts is
+                // not reported: its command never ran.
                 if interrupt.is_stopped() {
                     return None;
                 }
@@ -174,9 +171,9 @@ async fn run_host(
 ) -> Outcome {
     let started = Instant::now();
     let mut child = Command::new("ssh");
-    // Target overrides become `-o` options rather than a rewritten destination,
-    // so `~/.ssh/config` stays the single source of connection configuration
-    // and everything else in it still applies. See ADR-0001 and ADR-0002.
+    // Overrides become `-o` options rather than a rewritten destination, so
+    // `~/.ssh/config` stays the single source of connection configuration and
+    // everything else in it still applies.
     if let Some(user) = &host.user {
         child.arg("-o").arg(format!("User={user}"));
     }
@@ -187,8 +184,8 @@ async fn run_host(
         child.arg("-o").arg(format!("HostName={ip}"));
     }
     // The command is forwarded verbatim as ssh arguments: ssh does its own
-    // joining into a remote command string. `--` ends option parsing so a
-    // destination is never read as an option. See ADR-0001.
+    // joining into a remote command string. `--` ends option parsing, so a
+    // destination is never read as an option.
     child.arg("--").arg(&host.name).args(command);
     // No terminal and no stdin: ssh must not stop to prompt, since many Hosts
     // run at once and there is nobody to answer.
@@ -197,7 +194,7 @@ async fn run_host(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     // Its own process group, so a terminal's interrupt reaches rshx alone and
-    // rshx decides when its children die. See ADR-0008.
+    // rshx decides when its children die.
     child.process_group(0);
 
     match child.spawn() {
@@ -216,10 +213,10 @@ async fn run_host(
 
             let stdout = running.stdout.take().expect("stdout was piped");
             let stderr = running.stderr.take().expect("stderr was piped");
-            // Both streams are drained at once, on their own tasks: reading
-            // them in turn would deadlock as soon as the child filled the one
-            // not being read. Tasks rather than `join!` so that terminating
-            // the child below cannot cancel a half-read stream.
+            // Both streams are drained at once: reading them in turn would
+            // deadlock as soon as the child filled the one not being read.
+            // Tasks rather than `join!`, so terminating the child below cannot
+            // cancel a half-read stream.
             let stdout_task = tokio::spawn(read_capped(stdout, STREAM_CAP));
             let stderr_task = tokio::spawn(read_capped(stderr, STREAM_CAP));
 
@@ -235,8 +232,7 @@ async fn run_host(
 
             // A Host rshx killed is `cancelled` whatever exit status its death
             // produced: ssh exits 255 on SIGTERM, which would otherwise read
-            // as `unreachable`. See ADR-0008. An interrupt outranks a timeout:
-            // the run is ending, and `cancelled` is what happened to it.
+            // as `unreachable`. An interrupt outranks a timeout.
             let killed = interrupt.was_killed(&host.name);
             let exit_code = waited.as_ref().ok().and_then(|status| status.code());
             let status = match (killed, timed_out, &waited, exit_code) {
@@ -262,8 +258,7 @@ async fn run_host(
                 host: host.name.clone(),
                 status,
                 // Absent when rshx ended the child: its exit status says
-                // nothing about the command, and per ADR-0008 the remote
-                // command may still be running.
+                // nothing about the command, which may still be running.
                 exit_code: if killed || timed_out { None } else { exit_code },
                 cause,
                 stdout,
@@ -289,7 +284,7 @@ async fn run_host(
 }
 
 /// The most of each stream that is kept in memory. Past this the bytes are
-/// dropped, and the Outcome records that they were. See ADR-0010.
+/// dropped, and the Outcome records that they were.
 const STREAM_CAP: usize = 1024 * 1024;
 
 /// Reads a stream, keeping at most `cap` bytes.
@@ -321,10 +316,10 @@ where
     (kept, truncated)
 }
 
-/// The run's exit code, per ADR-0004: `failed` and `unreachable` are separate
-/// bits, and a `timeout` counts as `unreachable`. A `cancelled` Host is not a
-/// failure — rshx stopped waiting, the command did not fail — so a run that
-/// was interrupted exits 99 and nothing else. See ADR-0008.
+/// The run's exit code: `failed` and `unreachable` are separate bits, and a
+/// `timeout` counts as `unreachable`. A `cancelled` Host is not a failure —
+/// rshx stopped waiting, the command did not fail — so a run that was
+/// interrupted exits 99 and nothing else.
 pub fn exit_code(outcomes: &[Outcome]) -> u8 {
     if outcomes
         .iter()

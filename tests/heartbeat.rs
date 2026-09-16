@@ -1,4 +1,4 @@
-//! Ticket 09: the progress heartbeat.
+//! The progress heartbeat: one line on stderr while Hosts are in flight.
 
 mod support;
 

@@ -1,4 +1,5 @@
-//! Ticket 03: the fanout sliding window.
+//! The fanout sliding window: at most `-f` remote commands in flight, each one
+//! that finishes replaced by a pending Host.
 
 mod support;
 

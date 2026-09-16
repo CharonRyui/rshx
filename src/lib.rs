@@ -13,7 +13,7 @@ use std::process::ExitCode;
 
 use clap::Parser;
 
-/// Exit codes, per ADR-0004.
+/// Every Host was `ok`.
 pub const EXIT_OK: u8 = 0;
 /// A local error: the host file is missing or malformed.
 pub const EXIT_LOCAL: u8 = 1;

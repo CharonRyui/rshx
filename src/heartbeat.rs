@@ -3,7 +3,7 @@
 //! It is stderr chrome, never part of the report: a run's results are complete
 //! without it. It is drawn only when stderr is an interactive terminal, so a
 //! redirected file gets no heartbeat and no escape sequences, and it is off
-//! under `--json`. See ADR-0011.
+//! under `--json`.
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -33,9 +33,7 @@ struct State {
 }
 
 impl Heartbeat {
-    /// `chrome` is false when stderr is not a terminal, or under `--json`:
-    /// there is nobody watching, and a redirected file must stay free of
-    /// escape sequences.
+    /// `chrome` is false when stderr is not a terminal, or under `--json`.
     pub fn new(total: usize, chrome: bool) -> Heartbeat {
         let target = if chrome {
             ProgressDrawTarget::stderr()
@@ -44,21 +42,19 @@ impl Heartbeat {
         };
         let bar = ProgressBar::with_draw_target(Some(total as u64), target);
         // A spinner for liveness, then how far the run has got, then a bar for
-        // the proportion, then the one detail a count cannot give: what is
-        // still in flight. The bar takes the width left over, so the line
-        // always fills the terminal and the parts either side of it stay put.
+        // the proportion, then what is still in flight. The bar takes the width
+        // left over, so the line always fills the terminal and the parts either
+        // side of it stay put.
         if let Ok(style) =
             ProgressStyle::with_template("{spinner:.cyan} {pos}/{len} done {wide_bar:.green} {msg}")
         {
             bar.set_style(
                 style
-                    // The frames of the spinner. Its last character is what
-                    // the finished bar shows, and it is never seen: the
-                    // heartbeat is cleared before the summary.
+                    // The last character is what the finished bar shows, and it
+                    // is never seen: the heartbeat is cleared first.
                     .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏ ")
-                    // Filled, then the partial cell, then the empty cell, so
-                    // the bar reads as one continuous track rather than a
-                    // block of colour next to a gap.
+                    // Filled, then the partial cell, then the empty cell, so the
+                    // bar reads as one track rather than a block beside a gap.
                     .progress_chars("━╸─"),
             );
         }
@@ -94,9 +90,8 @@ impl Heartbeat {
     }
 
     /// Redraws between Hosts settling, so a slow Host's elapsed time still
-    /// moves rather than looking like a hung run. `tick` also advances the
-    /// spinner frame, which is the only part of the line that moves while
-    /// nothing settles — without it a long Host would look like a hung run.
+    /// moves. `tick` also advances the spinner frame, the only part of the
+    /// line that moves while nothing settles.
     pub fn tick(&self) {
         self.redraw();
         // Advances the spinner, not the position: the bar tracks Hosts that
@@ -106,10 +101,9 @@ impl Heartbeat {
 
     /// Runs `body` with the heartbeat out of the way, then redraws it.
     ///
-    /// Result lines are the report, and a progress line that redrew itself
-    /// over one would corrupt it. `suspend` clears the line first, which is
-    /// what makes this hold in a redirected file too: unlike
-    /// `ProgressBar::println`, it still writes when the bar is hidden.
+    /// Result lines are the report, and a progress line that redrew itself over
+    /// one would corrupt it. Unlike `ProgressBar::println`, `suspend` clears
+    /// the line and still writes when the bar is hidden.
     pub fn suspend<R>(&self, body: impl FnOnce() -> R) -> R {
         self.bar.suspend(body)
     }
@@ -122,9 +116,9 @@ impl Heartbeat {
     /// The line's text, as it would be drawn.
     ///
     /// How far the run has got is the template's `{pos}/{len}`, so the message
-    /// carries only what a count cannot: how much is in flight, and what is
-    /// taking longest. Naming the slowest Host is what tells a reader that a
-    /// run is waiting on one machine rather than on the network.
+    /// carries only what a count cannot: what is in flight, and what is taking
+    /// longest. Naming the slowest Host is what tells a reader the run is
+    /// waiting on one machine rather than on the network.
     fn message(&self) -> String {
         let state = self.state.borrow();
         match state.longest_running() {

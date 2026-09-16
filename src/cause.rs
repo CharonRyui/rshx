@@ -1,7 +1,7 @@
 //! Why a Host that is not `ok` did not work, inferred from ssh's stderr.
 //!
 //! This is the one place output text is consulted at all, and it never changes
-//! a Host's status or the run's exit code. See ADR-0005.
+//! a Host's status or the run's exit code.
 
 /// A best-effort explanation of a Host's failure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -124,10 +124,10 @@ mod tests {
 
     #[test]
     fn a_remote_commands_own_permission_error_looks_like_an_auth_failure() {
-        // ssh folds the remote command's stderr together with its own (a
-        // consequence noted in ADR-0001), so a remote `Permission denied` is
-        // indistinguishable from an authentication failure here. That is why
-        // `cause` is advisory and never changes a status or an exit code.
+        // ssh folds the remote command's stderr together with its own, so a
+        // remote `Permission denied` is indistinguishable from an
+        // authentication failure here. That is why `cause` is advisory and
+        // never changes a status or an exit code.
         assert_eq!(
             infer("cat: /etc/shadow: Permission denied\n"),
             Some(Cause::Auth)

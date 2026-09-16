@@ -1,4 +1,4 @@
-//! Ticket 04: host patterns.
+//! Host patterns: one bracketed range per name, expanded to many Hosts.
 
 mod support;
 
@@ -118,8 +118,8 @@ fn an_oversized_range_is_rejected_without_expanding_it() {
 #[test]
 fn every_expanded_name_is_validated_like_a_literal_one() {
     // The prefix is what carries the illegal character, so this is the
-    // expansion's fault, not the pattern syntax's. The set is the same one
-    // ticket 02 rejects for a literal name, reached through a pattern.
+    // expansion's fault, not the pattern syntax's. The set is the same one a
+    // literal name is rejected for, reached through a pattern.
     for (name, bad) in [
         ("ro@ot[01-02]", "@"),
         ("node/[01-02]", "/"),

@@ -11,10 +11,10 @@ use serde::Deserialize;
 /// One machine the command runs on.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Host {
-    /// The Host's identity, and the destination handed to ssh. Per ADR-0007
-    /// this is restricted to `[A-Za-z0-9._-]+` and may not begin with `-`.
+    /// The Host's identity, and the destination handed to ssh. Restricted to
+    /// `[A-Za-z0-9._-]+`, and may not begin with `-`.
     pub name: String,
-    /// Target overrides, per ADR-0002: written here and nowhere else.
+    /// Target overrides: written here and nowhere else.
     pub user: Option<String>,
     pub port: Option<u16>,
     pub ip: Option<IpAddr>,
@@ -181,7 +181,7 @@ fn parse(path: &Path) -> Result<HostFile> {
             validate_user(user).map_err(|msg| anyhow::anyhow!("{entry_label}: {msg}"))?;
         }
         // An address is a property of one machine, so it cannot be shared by
-        // every Host a pattern expands to. See ADR-0002.
+        // every Host a pattern expands to.
         if entry.ip.is_some() && pattern {
             bail!(
                 "{entry_label}: `ip` cannot be set on a host pattern; \
@@ -227,7 +227,7 @@ fn parse_groups(raw: &BTreeMap<String, Vec<String>>) -> Result<BTreeMap<String, 
 }
 
 /// A Host's name is an ssh argv element, so it is validated against a
-/// whitelist rather than escaped. See ADR-0007.
+/// whitelist rather than escaped.
 fn validate_name(name: &str) -> Result<(), String> {
     if name.is_empty() {
         return Err("a name may not be empty".into());

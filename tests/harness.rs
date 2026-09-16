@@ -155,9 +155,8 @@ fn the_harness_adds_no_dependencies_of_its_own() {
 
 #[test]
 fn the_source_tree_has_no_leftover_placeholder_modules() {
-    // Ticket 01 cleared a layout that had been abandoned: module directories
-    // with nothing in them and a host-loading stub with no caller. Flat
-    // modules are what is left.
+    // An earlier layout was abandoned: module directories with nothing in them
+    // and a host-loading stub with no caller. Flat modules are what is left.
     let src = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/src"));
     let dirs: Vec<std::path::PathBuf> = std::fs::read_dir(src)
         .expect("src")

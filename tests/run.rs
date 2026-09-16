@@ -1,4 +1,4 @@
-//! Ticket 02: the first complete path — host file in, per-host report and exit
+//! The first complete path — host file in, per-host report and exit
 //! code out.
 
 mod support;
@@ -23,7 +23,8 @@ fn prints_one_line_per_host() {
         harness.respond_default(Response::ok().stdout("hi\n"));
 
         // A fanout of one makes the report follow the host file; with a wider
-        // fanout hosts are reported as they settle, which ticket 03 covers.
+        // fanout hosts are reported as they settle, which tests/fanout.rs
+        // covers.
         let out = run({
             let mut cmd = harness.rshx();
             cmd.args(["-H", file.to_str().unwrap(), "-f", "1", "--", "hostname"]);

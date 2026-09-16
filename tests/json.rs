@@ -1,4 +1,4 @@
-//! Ticket 08: machine-readable output.
+//! Machine-readable output: one JSON object per Host, one per line.
 
 mod support;
 
@@ -74,7 +74,7 @@ fn exit_code_is_absent_for_a_host_rshx_killed() {
     with_harness(|harness| {
         // A Host rshx itself terminated has no exit code of its own to report:
         // ssh exits 255 on SIGTERM, which would read as `unreachable` if it
-        // were passed through. See ADR-0008.
+        // were passed through.
         harness.respond_default(Response::ok().delay_ms(30_000));
         let file = harness.write("hosts.toml", ONE);
 

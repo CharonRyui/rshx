@@ -1,4 +1,4 @@
-//! Ticket 06: host groups and selection.
+//! Host groups and selection: `-g`, nesting, cycles and the reserved `all`.
 
 mod support;
 

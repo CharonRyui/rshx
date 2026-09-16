@@ -1,4 +1,4 @@
-//! Ticket 05: target overrides.
+//! Target overrides: `user`, `port` and `ip`, passed to ssh as `-o` options.
 
 mod support;
 
