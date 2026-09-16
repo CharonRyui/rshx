@@ -1,0 +1,109 @@
+name: Release
+
+# A tag is the only thing that publishes. `v0.1.0` and later.
+on:
+  push:
+    tags: ["v[0-9]+.*"]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # A tag can point at a commit whose CI never passed, so the gate is re-run
+  # here: nothing is published that has not been tested.
+  verify:
+    name: verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Clippy
+        run: cargo clippy --all-targets --locked -- -D warnings
+      - name: Test
+        run: cargo test --locked
+      # `rshx --version` and the Release must not be able to disagree.
+      - name: Check the tag matches the crate version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          version="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')"
+          if [ "$tag" != "$version" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} does not match Cargo.toml version ${version}"
+            exit 1
+          fi
+
+  release:
+    name: release
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      # Idempotent, so re-running a failed release is safe.
+      - name: Create the release
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo "release $GITHUB_REF_NAME already exists"
+          else
+            gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes
+          fi
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+  build:
+    name: build ${{ matrix.target }}
+    needs: release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    strategy:
+      # One target failing must not hide the others.
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+          - target: x86_64-unknown-linux-musl
+          # aarch64 needs a cross linker. zig is the documented way to get one
+          # without a full cross toolchain; the musl builds are static, so they
+          # carry no glibc floor and run on an older fleet node.
+          - target: aarch64-unknown-linux-gnu
+            zigbuild: true
+          - target: aarch64-unknown-linux-musl
+            zigbuild: true
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2
+        with:
+          target: ${{ matrix.target }}
+      # A venv, so the install does not depend on whether the runner's Python
+      # enforces PEP 668. This pulls cargo-zigbuild and the zig it links with.
+      - name: Install cargo-zigbuild
+        if: matrix.zigbuild
+        run: |
+          python3 -m venv "$RUNNER_TEMP/zigbuild"
+          "$RUNNER_TEMP/zigbuild/bin/pip" install --quiet cargo-zigbuild
+          echo "$RUNNER_TEMP/zigbuild/bin" >> "$GITHUB_PATH"
+      - name: Build
+        run: |
+          if [ "${{ matrix.zigbuild }}" = "true" ]; then
+            cargo zigbuild --release --locked --target ${{ matrix.target }}
+          else
+            cargo build --release --locked --target ${{ matrix.target }}
+          fi
+      # The archive holds the binary and nothing else.
+      - name: Package
+        run: |
+          archive="rshx-${GITHUB_REF_NAME}-${{ matrix.target }}.tar.gz"
+          tar -czf "$archive" -C "target/${{ matrix.target }}/release" rshx
+          tar -tzf "$archive"
+      - name: Upload
+        run: |
+          gh release upload "$GITHUB_REF_NAME" \
+            "rshx-${GITHUB_REF_NAME}-${{ matrix.target }}.tar.gz" --clobber
+        env:
+          GH_TOKEN: ${{ github.token }}
