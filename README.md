@@ -25,8 +25,7 @@ with mixed outcomes still reads as a table rather than as ragged text.
 it as arguments. `~/.ssh/config`, `ssh-agent`, `known_hosts`, `ProxyJump`,
 `ProxyCommand`, `IdentityFile`, `ControlMaster` and everything else in your ssh
 setup apply unchanged, because ssh is the one reading them. rshx implements no
-connection of its own and has no ssh library dependency — so it is not an ssh
-client, and cannot drift from the one you already have.
+connection of its own, so it cannot drift from the ssh you already have.
 
 **Hosts come from a file, not a plugin.** The host file is the only host
 source: no modules, no inventory schema, no service discovery.
@@ -45,12 +44,18 @@ what happened; there is no task model, no modules, and no YAML.
 
 ## Install
 
+Download the archive for your machine from the
+[Releases](https://github.com/CharonRyui/rshx/releases) page, then:
+
 ```console
-$ cargo build --release
-$ ./target/release/rshx --help
+$ tar xzf rshx-<tag>-x86_64-unknown-linux-musl.tar.gz
+$ install -m 755 rshx ~/.local/bin/
 ```
 
-Or `cargo install --path .`. The only runtime requirement is `ssh` on `PATH`.
+Each archive holds the single `rshx` binary and nothing else. The `musl` builds
+are static and run on any Linux; the `gnu` builds are dynamically linked against
+glibc. Releases cover Linux only — there is no Windows build. The only runtime
+requirement is `ssh` on `PATH`.
 
 ## Quick start
 
@@ -112,10 +117,8 @@ Overrides are `-o` options rather than a rewritten destination, so the rest of
 `~/.ssh/config` still applies to that host.
 
 Unknown fields are an error rather than ignored, so a typo is reported instead
-of silently dropping a host's configuration. Host names and users are validated
-against a whitelist — letters, digits, `.`, `_`, `-`, not starting with `-` —
-because both are handed to ssh as argv elements, and a whitelist cannot be
-escaped out of.
+of silently dropping a host's configuration. Host names and users are
+restricted to letters, digits, `.`, `_` and `-`, and may not start with `-`.
 
 ## Host patterns
 
@@ -279,8 +282,7 @@ work — and it says so under the summary.
 Ctrl-C stops the run: hosts still in flight are `cancelled`, hosts that had
 already settled keep their real status, and hosts that never started are not
 reported at all, since their command never ran. A second Ctrl-C does not wait
-out the grace period. Each ssh child runs in its own process group, so the
-interrupt reaches rshx alone and rshx decides when its children die.
+out the grace period.
 
 ## Options
 
@@ -294,56 +296,10 @@ Usage: rshx [OPTIONS] -- <COMMAND>...
       --stderr              Show the stderr of a host that is ok
       --timeout <DURATION>  How long to wait for any one host, such as 30s or 5m
       --json                One JSON object per host, one per line
-      --color <WHEN>        auto, always or never [default: auto]
+      --color <COLOR>       auto, always or never [default: auto]
 ```
 
 The command goes after `--` and is forwarded to ssh verbatim as its own
 arguments — rshx does no shell joining, so ssh does it, exactly as it would if
 you typed the command yourself. A destination is never read as an option,
 because `--` ends option parsing.
-
-## Development
-
-The toolchain is pinned in `rust-toolchain.toml`, so `cargo` here is the same
-rustc CI uses. That gate is:
-
-```console
-$ cargo fmt --all -- --check
-$ cargo check --all-targets --locked
-$ cargo clippy --all-targets --locked -- -D warnings
-$ cargo test --locked
-$ cargo build --release --locked
-```
-
-`prek` runs the same hooks on commit; `prek install` wires them up. `cargo test`
-is there because it is the only hook that catches a change which compiles and
-lints cleanly but breaks behaviour.
-
-Integration tests never touch the network or an sshd. Each one runs the real
-binary against a scripted fake `ssh` placed first on `PATH`, which records the
-argv of every invocation and replays a response scripted per destination, so
-how ssh was invoked and what the report says are both checkable offline. See
-`tests/support/mod.rs`.
-
-### Releasing
-
-Pushing a `v*` tag publishes. The release workflow re-runs the whole gate,
-refuses to continue if the tag disagrees with `Cargo.toml`, and then attaches
-one archive per target to the GitHub Release:
-
-```console
-$ git tag v0.1.0
-$ git push origin v0.1.0
-```
-
-| Target | Notes |
-|--------|-------|
-| `x86_64-unknown-linux-gnu` | The host build. |
-| `x86_64-unknown-linux-musl` | Static. |
-| `aarch64-unknown-linux-gnu` | Cross-built with `cargo-zigbuild`. |
-| `aarch64-unknown-linux-musl` | Static, cross-built with `cargo-zigbuild`. |
-
-Each archive holds the binary and nothing else. The `aarch64` targets need a
-cross linker; `pip install cargo-zigbuild` provides one and brings `zig` with
-it. Windows is not built: the interrupt and timeout paths are Unix-only, and
-the crate does not compile for a Windows target.
