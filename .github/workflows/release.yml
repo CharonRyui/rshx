@@ -1,6 +1,6 @@
 name: Release
 
-# A tag is the only thing that publishes. `v0.1.0` and later.
+# A tag is the only thing that publishes.
 on:
   push:
     tags: ["v[0-9]+.*"]
@@ -44,13 +44,17 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      # Idempotent, so re-running a failed release is safe.
-      - name: Create the release
+      # A draft, because this repo has immutable releases enabled: once a
+      # release is published its assets cannot be added, replaced or deleted.
+      # Assets must be attached while it is still a draft, so publication is
+      # deferred to the `publish` job after every target has been built.
+      - name: Create the draft release
         run: |
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
             echo "release $GITHUB_REF_NAME already exists"
           else
-            gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes
+            gh release create "$GITHUB_REF_NAME" --draft \
+              --title "$GITHUB_REF_NAME" --generate-notes
           fi
         env:
           GH_TOKEN: ${{ github.token }}
@@ -80,6 +84,13 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2
         with:
           target: ${{ matrix.target }}
+          # The action sets CARGO_BUILD_WARNINGS=deny by default, which turns
+          # any rustc warning into an error. cargo-zigbuild's bundled lld emits
+          # a deprecation warning on the aarch64 links ("ignoring deprecated
+          # linker optimization setting"), so deny fails those two targets on a
+          # warning this crate does not own. An empty string stops the action
+          # setting the variable at all.
+          build-warnings: ""
       # A venv, so the install does not depend on whether the runner's Python
       # enforces PEP 668. This pulls cargo-zigbuild and the zig it links with.
       - name: Install cargo-zigbuild
@@ -105,5 +116,22 @@ jobs:
         run: |
           gh release upload "$GITHUB_REF_NAME" \
             "rshx-${GITHUB_REF_NAME}-${{ matrix.target }}.tar.gz" --clobber
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+  # Fan-in. `needs: build` waits for every matrix leg, so a failure in any
+  # target skips this job and the draft stays a draft rather than publishing a
+  # half-populated release. Publishing is the only irreversible step, and it is
+  # the last one.
+  publish:
+    name: publish
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Publish the release
+        run: gh release edit "$GITHUB_REF_NAME" --draft=false --latest
         env:
           GH_TOKEN: ${{ github.token }}
