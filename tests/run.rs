@@ -37,8 +37,8 @@ fn prints_one_line_per_host() {
         assert!(lines[1].starts_with("node02 "), "{:?}", lines[1]);
         assert!(lines[2].starts_with("node03 "), "{:?}", lines[2]);
         assert!(
-            !out.stdout.contains("hi"),
-            "an ok host's stdout is not printed by default: {:?}",
+            lines[0].ends_with("hi"),
+            "a Host's output folds onto its own line: {:?}",
             out.stdout
         );
         assert!(out.stderr.contains("3 hosts"), "{:?}", out.stderr);

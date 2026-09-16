@@ -26,8 +26,8 @@ pub struct Cli {
     )]
     pub groups: Vec<String>,
 
-    /// Show each Host's stdout. Without it, only a Host that is not `ok`
-    /// shows its output.
+    /// Hide each Host's stdout. Without it every Host's output is shown,
+    /// folded onto its status line when it is a single short line.
     #[arg(long, short = 'q')]
     pub quiet: bool,
 

@@ -189,7 +189,7 @@ fn hosts_that_already_settled_keep_their_real_status() {
         harness.respond("node02", Response::ok().delay_ms(30_000));
         harness.respond("node03", Response::ok().delay_ms(30_000));
 
-        let child = start(harness, &["-f", "3", "--stdout", "--", "du -hs /data"]);
+        let child = start(harness, &["-f", "3", "--", "du -hs /data"]);
         wait_until(
             "the settled host's line and the slow hosts to be running",
             || harness.processes().len() == 3,

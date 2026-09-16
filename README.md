@@ -4,7 +4,7 @@ Run one command on many hosts over ssh, with a bounded fanout and a readable
 per-host report.
 
 ```console
-$ rshx -H hosts.toml --stdout -- du -hs /data
+$ rshx -H hosts.toml -- du -hs /data
 du -hs /data  ·  4 hosts
 node01 ok          0.31s  42G	/data
 node02 ok          0.28s  38G	/data
@@ -151,20 +151,22 @@ reserved and cannot be declared as a group.
 
 ## Output
 
-stdout carries one line per host and nothing else; stderr carries the chrome —
+stdout carries the host results and nothing else; stderr carries the chrome —
 the heading, the heartbeat, the summary, and the note about unfinished
 commands. So `rshx … > out` captures the results alone, while the progress and
 the summary still reach your terminal. That split is what makes `--json` safe to
 pipe: stdout stays machine-readable even when the run is long enough to draw a
 heartbeat.
 
-By default an `ok` host shows neither stream: its line is the whole result,
-which is what keeps a wide run readable. A host that is not `ok` always shows
-its stderr, because that is where the reason is.
+Every host's stdout is shown, folded onto its status line when it is a single
+short line and written as an indented block beneath it otherwise. An `ok` host's
+stderr is hidden: its line is the result, which is what keeps a wide run
+readable. A host that is not `ok` always shows its stderr, because that is where
+the reason is. `-q` drops the stdout too.
 
 | Flag       | Effect |
 |------------|--------|
-| `--stdout` | Show every host's stdout, including `ok` hosts. |
+| `-q`, `--quiet` | Hide every host's stdout. |
 | `--stderr` | Show an `ok` host's stderr. A host that is not `ok` shows it either way. |
 
 A stream that is exactly one line and at most 200 bytes — so a line of up to
@@ -288,7 +290,7 @@ Usage: rshx [OPTIONS] -- <COMMAND>...
   -H, --host-file <FILE>    The host file listing the hosts to run on
   -f, --fanout <N>          How many remote commands to run at once [default: 32]
   -g, --groups <GROUP>...   Run only the hosts these groups select
-      --stdout              Show each host's stdout
+  -q, --quiet               Hide each host's stdout
       --stderr              Show the stderr of a host that is ok
       --timeout <DURATION>  How long to wait for any one host, such as 30s or 5m
       --json                One JSON object per host, one per line
@@ -302,14 +304,46 @@ because `--` ends option parsing.
 
 ## Development
 
+The toolchain is pinned in `rust-toolchain.toml`, so `cargo` here is the same
+rustc CI uses. That gate is:
+
 ```console
-$ cargo test
-$ cargo clippy --all-targets -- -D warnings
-$ cargo fmt --check
+$ cargo fmt --all -- --check
+$ cargo check --all-targets --locked
+$ cargo clippy --all-targets --locked -- -D warnings
+$ cargo test --locked
+$ cargo build --release --locked
 ```
+
+`prek` runs the same hooks on commit; `prek install` wires them up. `cargo test`
+is there because it is the only hook that catches a change which compiles and
+lints cleanly but breaks behaviour.
 
 Integration tests never touch the network or an sshd. Each one runs the real
 binary against a scripted fake `ssh` placed first on `PATH`, which records the
 argv of every invocation and replays a response scripted per destination, so
 how ssh was invoked and what the report says are both checkable offline. See
 `tests/support/mod.rs`.
+
+### Releasing
+
+Pushing a `v*` tag publishes. The release workflow re-runs the whole gate,
+refuses to continue if the tag disagrees with `Cargo.toml`, and then attaches
+one archive per target to the GitHub Release:
+
+```console
+$ git tag v0.1.0
+$ git push origin v0.1.0
+```
+
+| Target | Notes |
+|--------|-------|
+| `x86_64-unknown-linux-gnu` | The host build. |
+| `x86_64-unknown-linux-musl` | Static. |
+| `aarch64-unknown-linux-gnu` | Cross-built with `cargo-zigbuild`. |
+| `aarch64-unknown-linux-musl` | Static, cross-built with `cargo-zigbuild`. |
+
+Each archive holds the binary and nothing else. The `aarch64` targets need a
+cross linker; `pip install cargo-zigbuild` provides one and brings `zig` with
+it. Windows is not built: the interrupt and timeout paths are Unix-only, and
+the crate does not compile for a Windows target.

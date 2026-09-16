@@ -55,11 +55,7 @@ fn hosts_that_finish_inside_the_limit_are_untouched() {
         harness.respond_default(Response::ok().stdout("done\n").delay_ms(100));
         let file = harness.write("hosts.toml", THREE);
 
-        let out = run(rshx(
-            harness,
-            &file,
-            &["--timeout", "10s", "--stdout", "--", "true"],
-        ));
+        let out = run(rshx(harness, &file, &["--timeout", "10s", "--", "true"]));
 
         assert_eq!(out.code, 0, "{}", out.stderr);
         assert_eq!(

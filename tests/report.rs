@@ -39,19 +39,19 @@ fn on_terminal(
 }
 
 #[test]
-fn an_ok_host_prints_one_line_and_none_of_its_stdout() {
+fn a_quiet_host_prints_one_line_and_none_of_its_stdout() {
     with_harness(|harness| {
         harness.respond_default(Response::ok().stdout("42G /data\n"));
         let file = harness.write("hosts.toml", ONE);
 
-        let out = run(rshx(harness, &file, &["--", "du -hs /data"]));
+        let out = run(rshx(harness, &file, &["-q", "--", "du -hs /data"]));
 
         assert_eq!(out.code, 0, "{}", out.stderr);
         assert_eq!(out.stdout_lines().len(), 1, "{:?}", out.stdout);
         assert!(out.stdout.starts_with("node01 ok "), "{:?}", out.stdout);
         assert!(
             !out.stdout.contains("42G"),
-            "an ok Host's output is not printed by default: {:?}",
+            "a quiet Host's output is not printed: {:?}",
             out.stdout
         );
     });
@@ -63,7 +63,7 @@ fn a_one_line_stream_folds_onto_the_status_line() {
         harness.respond_default(Response::ok().stdout("42G /data\n"));
         let file = harness.write("hosts.toml", TWO);
 
-        let out = run(rshx(harness, &file, &["--stdout", "--", "du -hs /data"]));
+        let out = run(rshx(harness, &file, &["--", "du -hs /data"]));
 
         assert_eq!(out.code, 0, "{}", out.stderr);
         let lines = out.stdout_lines();
@@ -83,7 +83,7 @@ fn a_multi_line_stream_becomes_an_indented_block() {
         harness.respond_default(Response::ok().stdout("first\nsecond\nthird\n"));
         let file = harness.write("hosts.toml", ONE);
 
-        let out = run(rshx(harness, &file, &["--stdout", "--", "printf"]));
+        let out = run(rshx(harness, &file, &["--", "printf"]));
 
         assert_eq!(out.code, 0, "{}", out.stderr);
         let lines = out.stdout_lines();
@@ -103,7 +103,7 @@ fn a_trailing_newline_does_not_make_a_block_of_one_line() {
         harness.respond_default(Response::ok().stdout("single\n"));
         let file = harness.write("hosts.toml", ONE);
 
-        let out = run(rshx(harness, &file, &["--stdout", "--", "hostname"]));
+        let out = run(rshx(harness, &file, &["--", "hostname"]));
         assert_eq!(out.stdout_lines().len(), 1, "{:?}", out.stdout);
     });
 }
@@ -186,11 +186,11 @@ fn stderr_flag_shows_an_ok_hosts_stderr() {
         harness.respond_default(Response::ok().stderr("a warning\n"));
         let file = harness.write("hosts.toml", ONE);
 
-        let quiet = run(rshx(harness, &file, &["--", "hostname"]));
+        let silent = run(rshx(harness, &file, &["--", "hostname"]));
         assert!(
-            !quiet.stdout.contains("a warning"),
+            !silent.stdout.contains("a warning"),
             "an ok Host's stderr is hidden by default: {:?}",
-            quiet.stdout
+            silent.stdout
         );
 
         let loud = run(rshx(harness, &file, &["--stderr", "--", "hostname"]));
@@ -292,12 +292,12 @@ fn the_cause_comes_from_stderr_not_stdout() {
         );
         let file = harness.write("hosts.toml", ONE);
 
-        let out = run(rshx(harness, &file, &["--stdout", "--", "x"]));
+        let out = run(rshx(harness, &file, &["--", "x"]));
 
         assert_eq!(out.code, 2, "{}", out.stderr);
         assert!(
             out.stdout.contains("  ssh: connect to host node01 port 22"),
-            "the stdout is shown as asked: {:?}",
+            "the stdout is shown by default: {:?}",
             out.stdout
         );
         assert!(
@@ -467,11 +467,7 @@ fn an_empty_stream_does_not_add_a_block() {
         harness.respond_default(Response::ok());
         let file = harness.write("hosts.toml", ONE);
 
-        let out = run(rshx(
-            harness,
-            &file,
-            &["--stdout", "--stderr", "--", "true"],
-        ));
+        let out = run(rshx(harness, &file, &["--stderr", "--", "true"]));
 
         assert_eq!(
             out.stdout_lines().len(),
