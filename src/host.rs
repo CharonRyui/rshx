@@ -14,18 +14,18 @@ pub struct Host {
     /// The Host's identity, and the destination handed to ssh. Restricted to
     /// `[A-Za-z0-9._-]+`, and may not begin with `-`.
     pub name: String,
-    /// Target overrides: written here and nowhere else.
     pub user: Option<String>,
     pub port: Option<u16>,
     pub ip: Option<IpAddr>,
+    /// Whether this Host's remote command authenticates with a password of its
+    /// own, rather than the one password the rest of the run shares.
+    pub unique_privilege_pass: bool,
 }
 
-/// The parsed host file.
 #[derive(Debug)]
 pub struct HostFile {
     pub path: PathBuf,
     pub hosts: Vec<Host>,
-    /// Host groups by name, as declared. Selection expands them.
     groups: BTreeMap<String, Vec<String>>,
 }
 
@@ -41,8 +41,7 @@ impl HostFile {
         }
 
         let wanted = self.selected_names(groups)?;
-        // Report in host-file order, so a run reads the same way whatever
-        // order the groups were named in.
+        // Report in host-file order, whatever order the groups were named in.
         Ok(self
             .hosts
             .iter()
@@ -50,7 +49,6 @@ impl HostFile {
             .collect())
     }
 
-    /// The Host names the given groups select.
     fn selected_names(&self, groups: &[String]) -> Result<BTreeSet<String>> {
         let mut selected = BTreeSet::new();
         for group in groups {
@@ -61,7 +59,6 @@ impl HostFile {
         Ok(selected)
     }
 
-    /// Expands one group into the names it selects, following child groups.
     fn expand_group(&self, group: &str, visiting: &mut Vec<String>) -> Result<BTreeSet<String>> {
         if group == ALL {
             return Ok(self.hosts.iter().map(|host| host.name.clone()).collect());
@@ -87,7 +84,7 @@ impl HostFile {
 
         let mut names = BTreeSet::new();
         for selector in selectors {
-            // A child group is a selector that names a group rather than a Host.
+            // A selector may name a child group rather than a Host.
             if self.groups.contains_key(selector) {
                 names.extend(self.expand_group(selector, visiting)?);
                 continue;
@@ -159,7 +156,6 @@ fn config_dir() -> Option<PathBuf> {
         .map(|home| PathBuf::from(home).join(".config"))
 }
 
-/// Reads and validates the host file.
 pub fn load(path: &Path) -> Result<HostFile> {
     parse(path).with_context(|| path.display().to_string())
 }
@@ -207,6 +203,7 @@ fn parse(path: &Path) -> Result<HostFile> {
                 user: entry.user.clone(),
                 port: entry.port,
                 ip: entry.ip,
+                unique_privilege_pass: entry.unique_privilege_pass,
             });
         }
     }
@@ -218,7 +215,6 @@ fn parse(path: &Path) -> Result<HostFile> {
     })
 }
 
-/// Reads the `[groups]` table, rejecting the reserved name.
 fn parse_groups(raw: &BTreeMap<String, Vec<String>>) -> Result<BTreeMap<String, Vec<String>>> {
     if raw.contains_key(ALL) {
         bail!("`{ALL}` is reserved and cannot be declared as a group");
@@ -246,9 +242,8 @@ fn validate_name(name: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// A user name is an ssh argv element too, since it is passed as
-/// `-o User=…`. It gets the same whitelist treatment as a Host name, so a
-/// host file cannot inject anything into ssh's argument list.
+/// A user name is an ssh argv element too, passed as `-o User=…`, so it gets
+/// the same whitelist: a host file cannot inject into ssh's argument list.
 fn validate_user(user: &str) -> Result<(), String> {
     if user.is_empty() {
         return Err("`user` may not be empty".into());
@@ -264,8 +259,6 @@ fn validate_user(user: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Expands a host entry's `name` into the Hosts it declares.
-///
 /// A name has at most one bracketed range: literal text, the range, literal
 /// text. Anything the syntax cannot express is an error rather than a guess,
 /// because a pattern that silently expands to the wrong Hosts would run a
@@ -299,9 +292,8 @@ fn expand(name: &str) -> Result<Vec<String>, String> {
         return Err(format!("`{name}` has an empty range"));
     }
 
-    // Parse every range and count the expansion before allocating anything: a
-    // range written with too many digits is a typo, and building the names
-    // first would exhaust memory long before the cap could reject it.
+    // Count the expansion before allocating anything: building the names first
+    // would exhaust memory before the cap could reject a typo'd range.
     let mut ranges = Vec::new();
     let mut total: usize = 0;
     for item in body.split(',') {
@@ -386,7 +378,6 @@ mod tests {
 
     #[test]
     fn the_cap_counts_every_item_in_the_range_list() {
-        // Each item is under the cap on its own; together they are over it.
         let half = MAX_EXPANSION / 2 + 1;
         let name = format!("n[0-{},0-{}]", half - 1, half - 1);
         let err = expand(&name).unwrap_err();
@@ -436,4 +427,9 @@ struct RawEntry {
     user: Option<String>,
     port: Option<u16>,
     ip: Option<IpAddr>,
+    /// Defaulted, so a host file written before this field existed still
+    /// parses. A Host that shares the run's password needs no declaration;
+    /// only one that needs a password of its own says so.
+    #[serde(default)]
+    unique_privilege_pass: bool,
 }

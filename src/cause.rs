@@ -1,7 +1,5 @@
 //! Why a Host that is not `ok` did not work, inferred from ssh's stderr.
-//!
-//! This is the one place output text is consulted at all, and it never changes
-//! a Host's status or the run's exit code.
+//! Output text is consulted only here; it changes no status or exit code.
 
 /// A best-effort explanation of a Host's failure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -23,14 +21,12 @@ impl Cause {
         }
     }
 
-    /// Reads ssh's stderr and guesses. Returns `None` when nothing matches,
-    /// which is the honest answer for a failure whose text says nothing useful.
+    /// Reads ssh's stderr and guesses; `None` when no wording matches.
     pub fn infer(stderr: &[u8]) -> Option<Cause> {
         let text = String::from_utf8_lossy(stderr);
         let text = text.to_ascii_lowercase();
 
-        // Authentication is checked first: "Permission denied (publickey)" is
-        // the common case, and its wording shares no markers with the others.
+        // Auth is checked first: its markers share nothing with the others.
         const AUTH: &[&str] = &[
             "permission denied",
             "authentication failed",
@@ -126,8 +122,7 @@ mod tests {
     fn a_remote_commands_own_permission_error_looks_like_an_auth_failure() {
         // ssh folds the remote command's stderr together with its own, so a
         // remote `Permission denied` is indistinguishable from an
-        // authentication failure here. That is why `cause` is advisory and
-        // never changes a status or an exit code.
+        // authentication failure; `cause` is advisory and changes no status.
         assert_eq!(
             infer("cat: /etc/shadow: Permission denied\n"),
             Some(Cause::Auth)

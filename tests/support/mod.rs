@@ -1,10 +1,8 @@
 //! Test harness: a scripted stand-in for `ssh`.
 //!
-//! Every integration test runs rshx against a fake `ssh` placed first on
-//! `PATH`. The fake records the argv of each invocation and the wall-clock
-//! interval it occupied, and replays a response scripted per destination. That
-//! makes the run's contract — how ssh is invoked, what the report says, what
-//! the process exits with — checkable with no network and no sshd.
+//! Every integration test runs rshx against a fake `ssh` first on `PATH`,
+//! which records each invocation's argv and interval and replays a response
+//! scripted per destination, so no network or sshd is needed.
 
 #![allow(dead_code)]
 
@@ -21,11 +19,10 @@ static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
 /// Held while an executable is written, and while a process is spawned.
 ///
 /// A forked child holds a copy of every descriptor this process has open until
-/// it reaches `exec`, including a descriptor another thread is writing the fake
-/// ssh with. `exec` of a file that still has an open write descriptor fails
-/// with `ETXTBSY`, so a spawn overlapping a stub write fails for a reason that
-/// has nothing to do with the test. Both sides take this lock; it is held only
-/// across the fork and the write, never while a child runs.
+/// it reaches `exec`, including one another thread is writing the fake ssh
+/// with; `exec` of a file with an open write descriptor fails with `ETXTBSY`.
+/// The lock is held only across the fork and the write, never while a child
+/// runs.
 static EXEC_LOCK: Mutex<()> = Mutex::new(());
 
 /// The exec lock, ignoring poisoning: a test that panicked mid-spawn must not
@@ -41,8 +38,7 @@ pub fn spawn(cmd: &mut Command) -> Child {
     cmd.spawn().expect("spawn")
 }
 
-/// Runs a command to completion and captures its output, the way
-/// `Command::output` does, but without holding the exec lock while it runs.
+/// Like `Command::output`, but the exec lock is not held while it runs.
 pub fn output(cmd: &mut Command) -> Output {
     cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -58,6 +54,9 @@ pub struct Response {
     stderr: Vec<u8>,
     code: i32,
     delay_ms: u64,
+    /// When set, the fake ssh asks for a password the way `sudo -S` does: it
+    /// prints rshx's `-p` prompt, reads a line, and fails unless it matches.
+    password: Option<String>,
 }
 
 impl Response {
@@ -67,6 +66,7 @@ impl Response {
             stderr: Vec::new(),
             code: 0,
             delay_ms: 0,
+            password: None,
         }
     }
 
@@ -112,6 +112,14 @@ impl Response {
         self.delay_ms = ms;
         self
     }
+
+    /// Asks for a password, the way a remote `sudo -S` does, and fails when
+    /// the password is not `password`. The prompt printed is the one rshx set
+    /// with `-p`, so a run that set none prompts nothing and reads no stdin.
+    pub fn prompt(mut self, password: &str) -> Response {
+        self.password = Some(password.to_string());
+        self
+    }
 }
 
 /// A temporary directory holding a fake `ssh` and everything it records.
@@ -154,7 +162,6 @@ impl Harness {
         self.dir.display().to_string()
     }
 
-    /// Writes a file into the harness directory and returns its path.
     pub fn write(&self, name: &str, contents: &str) -> PathBuf {
         let path = self.dir.join(name);
         if let Some(parent) = path.parent() {
@@ -170,7 +177,7 @@ impl Harness {
         self
     }
 
-    /// Scripts what the fake ssh does for a destination with no script of its own.
+    /// Scripts the fallback for a destination with no script of its own.
     pub fn respond_default(&self, response: Response) -> &Harness {
         self.script_response(&self.dir.join("resp").join("default"), response);
         self
@@ -190,6 +197,16 @@ impl Harness {
             ),
         )
         .unwrap();
+        match &response.password {
+            Some(password) => {
+                // `prompt` makes the stub ask; `password` is what it accepts.
+                fs::write(dir.join("prompt"), b"1").unwrap();
+                fs::write(dir.join("password"), password).unwrap();
+            }
+            None => {
+                let _ = fs::remove_file(dir.join("prompt"));
+            }
+        }
     }
 
     /// A command that runs the rshx binary against this harness.
@@ -207,6 +224,20 @@ impl Harness {
     /// Every invocation the fake ssh saw, as its argv.
     pub fn invocations(&self) -> Vec<Vec<String>> {
         self.records("argv", '\u{1f}')
+    }
+
+    /// Every password the fake ssh read from its stdin, as `(destination,
+    /// password)`. rshx writes it to the Host's ssh, which forwards it to the
+    /// remote command's stdin; one entry per read, so a Host that asked twice
+    /// appears twice, and one never asked appears not at all.
+    pub fn passwords(&self) -> Vec<(String, String)> {
+        self.read_records("stdin")
+            .iter()
+            .filter_map(|line| {
+                let (dest, password) = line.split_once(' ')?;
+                Some((dest.to_string(), password.to_string()))
+            })
+            .collect()
     }
 
     /// One entry per fake ssh run: its pid, its process group and its session.
@@ -262,16 +293,6 @@ impl Harness {
             .filter(|tick| tick.started)
             .map(|tick| tick.dest)
             .collect()
-    }
-
-    /// When the last fake ssh ended, in nanoseconds since the epoch, on the
-    /// same clock as `SystemTime::now`.
-    pub fn last_end(&self) -> Option<u128> {
-        self.timeline()
-            .iter()
-            .filter(|tick| !tick.started)
-            .map(|tick| tick.at)
-            .max()
     }
 
     /// The highest number of fake ssh processes that were running at once.
@@ -360,9 +381,8 @@ pub fn with_harness(body: impl FnOnce(&Harness)) {
     }
 }
 
-/// A pseudo-terminal, for testing what the report does when a stream really is
-/// a terminal. A captured pipe is not a terminal, so colour and the heartbeat
-/// are invisible without one.
+/// A pseudo-terminal, for testing the report on a stream that really is a
+/// terminal: colour and the heartbeat are invisible on a pipe.
 pub struct Tty {
     master: std::fs::File,
     slave: std::fs::File,
@@ -428,9 +448,7 @@ impl Tty {
 
 /// What a terminal shows once every byte has been written: the visible text
 /// with carriage returns, overwrites and line erases applied. Only the escape
-/// sequences the report actually emits are understood — erase-in-line, and
-/// SGR, which changes nothing about the text. This answers "what does the user
-/// end up looking at", which raw bytes cannot.
+/// sequences the report emits are understood — erase-in-line, and SGR.
 pub fn screen(bytes: &str) -> String {
     let mut lines: Vec<String> = Vec::new();
     let mut line: Vec<char> = Vec::new();
@@ -510,8 +528,7 @@ pub struct Tick {
     pub dest: String,
 }
 
-/// A summary of the run a test just performed, for assertions that read better
-/// than raw bytes.
+/// A summary of the run a test just performed.
 #[derive(Debug)]
 pub struct Run {
     pub code: i32,
@@ -563,9 +580,8 @@ impl Attach {
     };
 }
 
-/// Runs a command with the chosen streams attached to a terminal. Every other
-/// stream is captured in a pipe, never inherited, so a test cannot leak output
-/// into the harness's own terminal.
+/// Runs a command with the chosen streams attached to a terminal; every other
+/// stream is captured in a pipe, so no output leaks into the harness's own.
 pub fn run_on_tty(mut cmd: Command, attach: Attach) -> Run {
     let tty = Tty::new();
     if attach.stdout {
@@ -578,16 +594,14 @@ pub fn run_on_tty(mut cmd: Command, attach: Attach) -> Run {
     } else {
         cmd.stderr(std::process::Stdio::piped());
     }
-    // The Command owns the parent's copies of the terminal fd, and the read
-    // below only ends once every copy is closed. So the Command must be gone
-    // before the read starts, not at the end of the function.
+    // The Command holds the parent's copies of the terminal fd, and the read
+    // only ends once every copy is closed, so it must be dropped here.
     let mut child = spawn(&mut cmd);
     drop(cmd);
 
     // The terminal is drained on its own thread: reading it to EOF needs every
     // copy of the fd closed, which only happens once the child exits, and
-    // waiting for the child first would deadlock as soon as it filled the pty
-    // buffer.
+    // waiting first would deadlock as soon as it filled the pty buffer.
     let mut master = tty.into_master();
     let reader = std::thread::spawn(move || {
         use std::io::Read;
@@ -626,6 +640,146 @@ fn read_pipe<R: std::io::Read>(pipe: Option<R>) -> String {
     text
 }
 
+/// One answer to a terminal prompt: what to type, and how long to wait after
+/// the prompt appears before typing it.
+#[derive(Debug, Clone, Copy)]
+pub struct Typed<'a> {
+    pub text: &'a str,
+    pub after_ms: u64,
+}
+
+impl<'a> Typed<'a> {
+    /// Typed the moment the prompt appears.
+    pub fn now(text: &'a str) -> Typed<'a> {
+        Typed { text, after_ms: 0 }
+    }
+
+    /// Typed `ms` after the prompt appears, for what a slow typist does.
+    pub fn after(text: &'a str, ms: u64) -> Typed<'a> {
+        Typed { text, after_ms: ms }
+    }
+}
+
+/// The text of every password prompt rshx writes. A test waits for this before
+/// typing, the way a person does — and must: rshx flushes the terminal's input
+/// when it starts reading, so a password typed before the prompt is discarded.
+const PROMPT: &str = "privilege password";
+
+/// Runs a command on a terminal of its own, answering its password prompts.
+///
+/// The command gets a session and a controlling terminal of its own, with the
+/// terminal on stdin and stderr — the shape an interactive run has. stdout
+/// stays a pipe, so the report can be read as text rather than off a screen.
+/// Each answer is typed after the next prompt appears, so `answers[i]` answers
+/// the `i`-th prompt.
+pub fn run_on_tty_answering(mut cmd: Command, answers: &[Typed]) -> Run {
+    let tty = Tty::new();
+    cmd.stdin(tty.stdio()).stderr(tty.stdio());
+    // Every stream is set explicitly, so none inherits the harness's own.
+    cmd.stdout(std::process::Stdio::piped());
+    controlling_terminal(&mut cmd);
+
+    let mut child = spawn(&mut cmd);
+    drop(cmd);
+
+    let mut master = tty.into_master();
+    let mut writer = master.try_clone().expect("clone the pty");
+    let (chunks, arrivals) = std::sync::mpsc::channel::<String>();
+    let reader = std::thread::spawn(move || {
+        use std::io::Read;
+        let mut all = String::new();
+        let mut buf = [0u8; 4096];
+        loop {
+            match master.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    let chunk = String::from_utf8_lossy(&buf[..n]).into_owned();
+                    all.push_str(&chunk);
+                    if chunks.send(chunk).is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+        all
+    });
+
+    let mut seen = String::new();
+    let mut answered = 0;
+    while answered < answers.len() {
+        // Bounded, so a prompt that never comes fails the test rather than
+        // hanging it. Long enough for a deliberately slow answer.
+        let Ok(chunk) = arrivals.recv_timeout(Duration::from_secs(30)) else {
+            break;
+        };
+        seen.push_str(&chunk);
+        if seen.matches(PROMPT).count() > answered {
+            let answer = answers[answered];
+            if answer.after_ms > 0 {
+                std::thread::sleep(ms(answer.after_ms));
+            }
+            use std::io::Write;
+            let _ = writer.write_all(answer.text.as_bytes());
+            let _ = writer.write_all(b"\n");
+            let _ = writer.flush();
+            answered += 1;
+        }
+    }
+    // Drained to the end, so the child is never blocked on a full pty buffer.
+    while let Ok(chunk) = arrivals.recv_timeout(Duration::from_secs(30)) {
+        seen.push_str(&chunk);
+    }
+
+    let piped_stdout = read_pipe(child.stdout.take());
+    let code = child.wait().expect("wait").code().expect("exited normally");
+    let terminal = reader.join().expect("pty reader");
+
+    Run {
+        code,
+        stdout: piped_stdout,
+        stderr: terminal,
+    }
+}
+
+/// Runs a command with no terminal at all: a session of its own, and nothing
+/// that could be a controlling terminal — the shape a run has from a script or
+/// a CI job, where there is no `/dev/tty` to ask on. A child left in the
+/// harness's session would inherit whatever terminal the test runs under.
+pub fn run_detached(mut cmd: Command) -> Run {
+    cmd.stdin(std::process::Stdio::null());
+    // `setsid` alone leaves no controlling terminal, so `/dev/tty` fails.
+    unsafe {
+        use std::os::unix::process::CommandExt;
+        cmd.pre_exec(|| {
+            if libc::setsid() == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    run(cmd)
+}
+
+/// Gives the child a session and `tty` as its controlling terminal.
+fn controlling_terminal(cmd: &mut Command) {
+    // SAFETY: `setsid` and `TIOCSCTTY` are async-signal-safe, which is what a
+    // `pre_exec` closure is allowed to call.
+    unsafe {
+        use std::os::unix::process::CommandExt;
+        cmd.pre_exec(|| {
+            if libc::setsid() == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            // fd 0 is the terminal this child was handed; a pty without
+            // `TIOCSCTTY` is not a controlling terminal, so `/dev/tty` fails.
+            if libc::ioctl(0, libc::TIOCSCTTY, 0) == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+}
+
 pub fn ms(ms: u64) -> Duration {
     Duration::from_millis(ms)
 }
@@ -637,8 +791,7 @@ pub fn timed<T>(body: impl FnOnce() -> T) -> (T, Duration) {
     (value, start.elapsed())
 }
 
-/// The fake ssh. It records what it was asked to do, then plays the response
-/// scripted for its destination.
+/// The fake ssh: records what it was asked, then plays its scripted response.
 const STUB: &str = r#"#!/bin/sh
 # Fake ssh for rshx's integration tests. See tests/support/mod.rs.
 dir="$RSHX_STUB_DIR"
@@ -673,6 +826,39 @@ printf 'start %s %s\n' "$(date +%s%N)" "$dest" >> "$dir/timeline"
 # The pid, its process group and its session, so a test can tell whether rshx
 # gave the child a group of its own.
 printf 'proc %s %s %s\n' "$$" "$(ps -o pgid= -p $$ | tr -d ' ')" "$(ps -o sid= -p $$ | tr -d ' ')" >> "$dir/procs"
+
+# When the response asks for one, do what `sudo -S` does: print the prompt rshx
+# set with `-p` to stderr, read the password from stdin, and retry a few times
+# before giving up. The prompt comes from rshx's own argument, so a run that
+# failed to set one prompts nothing and this reads nothing.
+if [ -f "$resp/prompt" ]; then
+    prompt=
+    prev=
+    for arg in "$@"; do
+        if [ "$prev" = "-p" ]; then prompt="$arg"; break; fi
+        case "$arg" in
+            -p?*) prompt=${arg#-p}; break ;;
+        esac
+        prev="$arg"
+    done
+    want=$(cat "$resp/password" 2>/dev/null) || want=
+    tries=0
+    matched=
+    while [ "$tries" -lt 3 ]; do
+        tries=$((tries + 1))
+        printf '%s' "$prompt" >&2
+        typed=
+        IFS= read -r typed || break
+        printf '%s %s\n' "$dest" "$typed" >> "$dir/stdin"
+        if [ "$typed" = "$want" ]; then matched=1; break; fi
+        printf 'Sorry, try again.\n' >&2
+    done
+    if [ -z "$matched" ]; then
+        printf 'sudo: %s incorrect password attempts\n' "$tries" >&2
+        code=1
+    fi
+fi
+
 if [ "$delay" != "0" ]; then sleep "$delay"; fi
 [ -f "$resp/out" ] && cat "$resp/out"
 [ -f "$resp/err" ] && cat "$resp/err" >&2

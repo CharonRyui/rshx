@@ -17,8 +17,7 @@ use crate::run::{Outcome, Status};
 /// `--color`'s values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum ColorWhen {
-    /// Colour when the stream being written is a terminal, and `NO_COLOR` is
-    /// unset. This is the default.
+    /// Colour when the stream is a terminal and `NO_COLOR` is unset (default).
     Auto,
     /// Always colour, even into a pipe.
     Always,
@@ -26,8 +25,7 @@ pub enum ColorWhen {
     Never,
 }
 
-/// A stream that decides its own colouring, from the terminal it is attached
-/// to, unless `--color` overrides that.
+/// A stream that colours from its own terminal, unless `--color` overrides.
 fn stream<T: anstream::stream::RawStream>(when: ColorWhen, raw: T) -> AutoStream<T> {
     match when {
         ColorWhen::Auto => AutoStream::auto(raw),
@@ -39,8 +37,7 @@ fn stream<T: anstream::stream::RawStream>(when: ColorWhen, raw: T) -> AutoStream
 /// Which streams the report shows.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Detail {
-    /// Show stdout. Without it, stdout is shown only for a Host that is not
-    /// `ok` — an `ok` Host's output is the thing a wide run must not drown in.
+    /// Show stdout. Without it, stdout is shown only for a non-`ok` Host.
     pub stdout: bool,
     /// Show the stderr of a Host that is `ok`. A Host that is not `ok` always
     /// shows its stderr, because that is where the reason is.
@@ -87,12 +84,21 @@ impl Reporter {
         }
     }
 
+    /// One line about rshx's own doing, before anything has run. Not chrome:
+    /// the heading is about the run and is dropped when nobody is watching,
+    /// while a warning is about the command rshx was asked to run.
+    pub fn warning(&mut self, message: &str) {
+        let _ = writeln!(
+            self.stderr,
+            "rshx: {}warning:{} {message}",
+            self.styles.warn.render(),
+            self.styles.warn.render_reset()
+        );
+    }
+
     /// One line naming what is about to run, so the report has a heading.
-    ///
-    /// This is chrome, not report: it goes to stderr, and only when stderr is a
-    /// terminal. Being written before the first Host settles, it also says how
-    /// many Hosts the run selected — which `-g` can otherwise leave unclear
-    /// until the summary.
+    /// Chrome, not report: stderr, and only when stderr is a terminal. It also
+    /// says how many Hosts the run selected, which `-g` can leave unclear.
     pub fn heading(&mut self, command: &[String], hosts: usize, fanout: u32) {
         if !self.chrome {
             return;
@@ -121,13 +127,12 @@ impl Reporter {
             Format::Plain => self.plain(outcome),
             Format::Json => self.json(outcome),
         }
-        // Flushed per Host, so a consumer reading a pipe sees each result as
-        // it settles rather than when the buffer happens to fill.
+        // Flushed per Host, so a pipe reader sees each result as it settles.
         let _ = self.stdout.flush();
     }
 
-    /// One Host, as a line of JSON. Written by hand rather than through a
-    /// `Serializer` so the object's field order matches the documented one.
+    /// One Host, as a line of JSON. Written by hand so the field order is the
+    /// documented one.
     fn json(&mut self, outcome: &Outcome) {
         let line = JsonLine {
             host: &outcome.host,
@@ -145,8 +150,7 @@ impl Reporter {
             Ok(text) => {
                 let _ = writeln!(self.stdout, "{text}");
             }
-            // Nothing in a JsonLine can fail to serialize, so this is
-            // unreachable in practice.
+            // Nothing in a JsonLine can fail to serialize.
             Err(err) => {
                 let _ = writeln!(self.stderr, "rshx: could not encode a result: {err}");
             }
@@ -159,9 +163,8 @@ impl Reporter {
         let show_stderr = self.detail.stderr || outcome.status != Status::Ok;
 
         let mut line = self.line(outcome);
-        // A single-line stream folds onto the status line, which is what makes
-        // `du -hs /data` readable. Anything longer goes below as an indented
-        // block, so a chatty Host cannot destroy the report's shape.
+        // A single-line stream folds onto the status line. Anything longer is
+        // an indented block below, so a chatty Host cannot wreck the shape.
         let folded = if show_stdout {
             single_line(&outcome.stdout)
         } else {
@@ -188,27 +191,24 @@ impl Reporter {
     }
 
     /// The one line that carries a Host's name, status, duration and cause.
-    ///
-    /// Only rshx's own tokens are styled. A Host's output is remote bytes rshx
-    /// cannot interpret, so it is passed through uncoloured.
+    /// Only rshx's own tokens are styled: a Host's output is remote bytes rshx
+    /// cannot interpret, so it passes through uncoloured.
     fn line(&self, outcome: &Outcome) -> String {
         let s = &self.styles;
         let status = outcome.status.as_str();
         let style = s.status(outcome.status);
 
         let mut line = String::new();
-        // The name is bold rather than coloured: colour is reserved for what a
-        // Host's outcome *is*, the name is what it *is called*, and weight
-        // survives every terminal theme where a colour may not.
+        // The name is bold rather than coloured: colour is reserved for a
+        // Host's outcome, and weight survives where a colour may not.
         line.push_str(&format!(
             "{}{}{}",
             s.host.render(),
             outcome.host,
             s.host.render_reset()
         ));
-        // Padded to the longest status, so the duration and any folded output
-        // line up into columns however mixed the run's outcomes are. Spaces
-        // have no colour, so the reset lands where the next column starts.
+        // Padded to the longest status, so the columns line up. Spaces have no
+        // colour, so the reset lands where the next column starts.
         line.push_str(&format!(
             " {}{status:<STATUS_WIDTH$}{}",
             style.render(),
@@ -238,8 +238,7 @@ impl Reporter {
             "{}",
             self.summary_line(outcomes, not_started, elapsed)
         );
-        // A run that was cut short must not read as though the remote work
-        // stopped with it.
+        // A run cut short must not read as though the remote work stopped.
         if outcomes
             .iter()
             .any(|outcome| outcome.status.is_unfinished())
@@ -256,9 +255,8 @@ impl Reporter {
         let _ = self.stderr.flush();
     }
 
-    /// The run's outcome. Only the counts carry colour, so the line still
-    /// reads as plain text when it is stripped. The elapsed time is the one
-    /// part a reader almost never needs, so it is the one part that is dimmed.
+    /// The run's outcome. Only the counts carry colour, so the line still reads
+    /// as plain text when stripped; the elapsed time is dimmed.
     fn summary_line(&self, outcomes: &[Outcome], not_started: usize, elapsed: Duration) -> String {
         let total = outcomes.len() + not_started;
         let host_word = if total == 1 { "host" } else { "hosts" };
@@ -266,8 +264,7 @@ impl Reporter {
         let mut parts = Vec::new();
         for status in Status::ALL {
             let n = outcomes.iter().filter(|o| o.status == status).count();
-            // `ok` is always shown; the others only when they happened, which
-            // is what keeps a clean run to a single short line.
+            // `ok` is always shown; the others only when they happened.
             if status == Status::Ok || n > 0 {
                 let style = self.styles.status(status);
                 parts.push(format!(
@@ -278,8 +275,8 @@ impl Reporter {
                 ));
             }
         }
-        // A Host that never started is not a status: its command never ran.
-        // Saying so is the only way the counts add up to the Hosts selected.
+        // A Host that never started is not a status: its command never ran, so
+        // the counts need it spelled out to add up to the Hosts selected.
         if not_started > 0 {
             parts.push(format!("{not_started} not started"));
         }
@@ -302,12 +299,8 @@ const UNFINISHED_NOTE: &str =
 /// report can be written as Hosts settle rather than buffered to measure them.
 const STATUS_WIDTH: usize = 11; // "unreachable"
 
-/// Colours for the parts of the report that carry meaning.
-///
-/// Colour is reserved for a Host's *outcome*, the one thing a reader scans for;
-/// the Host's name is bold instead, and everything secondary is dimmed. Every
-/// styled token is also written as plain text, so the report never depends on
-/// colour to be read.
+/// Colour is reserved for a Host's *outcome*; the name is bold instead, and
+/// everything else is dimmed. Every styled token is also plain text.
 struct Styles {
     ok: Style,
     failed: Style,
@@ -318,8 +311,10 @@ struct Styles {
     host: Style,
     /// The command, in the heading.
     command: Style,
-    /// Everything a reader only looks at when they need it: a duration, a
-    /// cause, the run's elapsed time.
+    /// The word `warning`, on a line about what rshx is doing rather than how a
+    /// Host ended. Yellow like `unreachable`: worth looking at, not a failure.
+    warn: Style,
+    /// A duration, a cause, the run's elapsed time: looked at only when needed.
     dim: Style,
 }
 
@@ -333,6 +328,7 @@ impl Styles {
             cancelled: AnsiColor::BrightBlack.on_default(),
             host: Style::new().bold(),
             command: Style::new().bold(),
+            warn: AnsiColor::Yellow.on_default().bold(),
             dim: Style::new().dimmed(),
         }
     }
@@ -367,17 +363,14 @@ struct JsonLine<'a> {
     truncated: bool,
 }
 
-/// Written where a stream lost bytes, so a reader is never left trusting a
-/// silently shortened stream.
+/// Written where a stream lost bytes to rshx's cap.
 const TRUNCATED: &str = "[output truncated]";
 
-/// The longest stream that still folds onto the status line. A single line
-/// longer than this is a block like any other: folding a megabyte of text onto
-/// one line would defeat the point of folding.
+/// The longest stream that still folds onto the status line. Anything longer
+/// is a block like any other, so a megabyte never lands on one line.
 const FOLD_LIMIT: usize = 200;
 
-/// A stream that is exactly one line, with no trailing newline. `None` for an
-/// empty or multi-line stream, which need different treatment.
+/// A stream that is exactly one line, with no trailing newline, else `None`.
 fn single_line(stream: &[u8]) -> Option<String> {
     if stream.len() > FOLD_LIMIT {
         return None;

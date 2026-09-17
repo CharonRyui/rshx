@@ -1,9 +1,7 @@
 //! The line that says a long run is still alive.
 //!
-//! It is stderr chrome, never part of the report: a run's results are complete
-//! without it. It is drawn only when stderr is an interactive terminal, so a
-//! redirected file gets no heartbeat and no escape sequences, and it is off
-//! under `--json`.
+//! Stderr chrome, never part of the report, and off under `--json`. Drawn only
+//! when stderr is a terminal, so a redirected file gets no escape sequences.
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -13,9 +11,8 @@ use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 
 use crate::run::Outcome;
 
-/// How often the heartbeat is redrawn while Hosts are in flight. Only the
-/// elapsed time changes between Hosts settling, so this is a readability
-/// choice, not a scheduling one.
+/// How often the heartbeat is redrawn while Hosts are in flight: only the
+/// elapsed time changes between Hosts settling, so it is a readability choice.
 pub const TICK: Duration = Duration::from_millis(200);
 
 /// A one-line summary of a run in progress.
@@ -26,8 +23,7 @@ pub struct Heartbeat {
 
 #[derive(Default)]
 struct State {
-    /// When each in-flight Host started, so the longest-running one can be
-    /// named.
+    /// When each in-flight Host started, so the longest-running can be named.
     running: BTreeMap<String, Instant>,
     done: usize,
 }
@@ -41,10 +37,9 @@ impl Heartbeat {
             ProgressDrawTarget::hidden()
         };
         let bar = ProgressBar::with_draw_target(Some(total as u64), target);
-        // A spinner for liveness, then how far the run has got, then a bar for
-        // the proportion, then what is still in flight. The bar takes the width
-        // left over, so the line always fills the terminal and the parts either
-        // side of it stay put.
+        // Spinner, progress count, bar, then what is in flight. The bar takes
+        // the leftover width, so the line fills the terminal and the parts
+        // beside it stay put.
         if let Ok(style) =
             ProgressStyle::with_template("{spinner:.cyan} {pos}/{len} done {wide_bar:.green} {msg}")
         {
@@ -53,8 +48,8 @@ impl Heartbeat {
                     // The last character is what the finished bar shows, and it
                     // is never seen: the heartbeat is cleared first.
                     .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏ ")
-                    // Filled, then the partial cell, then the empty cell, so the
-                    // bar reads as one track rather than a block beside a gap.
+                    // Filled, then partial, then empty: the bar reads as one
+                    // track rather than a block beside a gap.
                     .progress_chars("━╸─"),
             );
         }
@@ -73,10 +68,8 @@ impl Heartbeat {
         state.running.insert(host.to_string(), Instant::now());
     }
 
-    /// Records that a Host settled.
-    ///
-    /// The position is set before the message because each setter takes the
-    /// bar's lock, draws, and releases it. The message never mentions the
+    /// Records that a Host settled. The position is set before the message:
+    /// each setter draws on its own lock, and the message never mentions the
     /// count, so the frame between the two is stale, never wrong.
     pub fn finish(&self, outcome: &Outcome) {
         let done = {
@@ -90,8 +83,7 @@ impl Heartbeat {
     }
 
     /// Redraws between Hosts settling, so a slow Host's elapsed time still
-    /// moves. `tick` also advances the spinner frame, the only part of the
-    /// line that moves while nothing settles.
+    /// moves.
     pub fn tick(&self) {
         self.redraw();
         // Advances the spinner, not the position: the bar tracks Hosts that
@@ -99,11 +91,9 @@ impl Heartbeat {
         self.bar.tick();
     }
 
-    /// Runs `body` with the heartbeat out of the way, then redraws it.
-    ///
-    /// Result lines are the report, and a progress line that redrew itself over
-    /// one would corrupt it. Unlike `ProgressBar::println`, `suspend` clears
-    /// the line and still writes when the bar is hidden.
+    /// Runs `body` with the heartbeat out of the way, then redraws it: a redraw
+    /// over a result line corrupts the report. Unlike `ProgressBar::println`
+    /// this clears the line, and still writes when the bar is hidden.
     pub fn suspend<R>(&self, body: impl FnOnce() -> R) -> R {
         self.bar.suspend(body)
     }
@@ -113,11 +103,26 @@ impl Heartbeat {
         self.bar.finish_and_clear();
     }
 
-    /// The line's text, as it would be drawn.
-    ///
-    /// How far the run has got is the template's `{pos}/{len}`, so the message
-    /// carries only what a count cannot: what is in flight, and what is taking
-    /// longest. Naming the slowest Host is what tells a reader the run is
+    /// Takes the progress line off the terminal, for something that needs the
+    /// line to itself: a password prompt is written where the bar is drawn, and
+    /// a redraw under the cursor would corrupt it. The bar is finished, not
+    /// hidden: a hidden target stops drawing but leaves the last line standing.
+    pub fn pause(&self) {
+        self.bar.finish_and_clear();
+    }
+
+    /// Puts the line back, at the position it left off. `reset` returns the
+    /// bar to `InProgress` and zeroes the position, so it must be followed by
+    /// a restore.
+    pub fn resume(&self) {
+        self.bar.reset();
+        self.bar.set_position(self.state.borrow().done as u64);
+        self.redraw();
+    }
+
+    /// The line's text, as it would be drawn: how far the run has got is the
+    /// template's `{pos}/{len}`, so this carries only what a count cannot —
+    /// what is in flight, and the slowest Host, which tells a reader the run is
     /// waiting on one machine rather than on the network.
     fn message(&self) -> String {
         let state = self.state.borrow();

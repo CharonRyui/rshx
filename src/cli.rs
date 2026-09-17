@@ -10,13 +10,12 @@ pub struct Cli {
     #[arg(short = 'H', long, value_name = "FILE")]
     pub host_file: Option<PathBuf>,
 
-    /// How many remote commands to run at once. Each command that finishes is
-    /// replaced by a pending one.
+    /// How many commands run at once; a finish is replaced by a pending one.
     #[arg(short = 'f', long, value_name = "N", default_value_t = 32, value_parser = clap::value_parser!(u32).range(1..))]
     pub fanout: u32,
 
-    /// Run only the Hosts these host groups select. Repeatable, and each value
-    /// may be a comma-separated list. Defaults to every Host in the host file.
+    /// Run only the Hosts these groups select. Repeatable, each value may be
+    /// comma-separated; defaults to every Host in the host file.
     #[arg(
         short = 'g',
         long,
@@ -26,20 +25,24 @@ pub struct Cli {
     )]
     pub groups: Vec<String>,
 
-    /// Hide each Host's stdout. Without it every Host's output is shown,
-    /// folded onto its status line when it is a single short line.
+    /// Hide each Host's stdout.
     #[arg(long, short = 'q')]
     pub quiet: bool,
 
-    /// Show the stderr of a Host that is `ok`. A Host that is not `ok` always
-    /// shows its stderr.
+    /// Show an `ok` Host's stderr; one that is not `ok` always shows stderr.
     #[arg(long)]
     pub stderr: bool,
 
-    /// How long to wait for any one Host before giving up on it, such as
-    /// `30s` or `5m`. Without it there is no limit. A Host that times out is
-    /// reported as `timeout` and its ssh is terminated; the remote command is
-    /// not stopped, and every other Host carries on.
+    /// Run the command as root, with `sudo`, answering its password prompt
+    /// from the terminal when a Host asks. The command is wrapped whole, so an
+    /// inner `sudo` keeps its own options and elevates a second time inside
+    /// rshx's; a Host that needs its own password says so in the host file.
+    #[arg(long)]
+    pub privilege: bool,
+
+    /// How long to wait for any one Host, such as `30s` or `5m`; without it
+    /// there is no limit. A Host that times out is reported as `timeout`, its
+    /// ssh is terminated, and the remote command is not stopped.
     #[arg(long, value_name = "DURATION", value_parser = humantime::parse_duration)]
     pub timeout: Option<std::time::Duration>,
 
