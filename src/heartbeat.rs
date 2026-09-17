@@ -113,6 +113,27 @@ impl Heartbeat {
         self.bar.finish_and_clear();
     }
 
+    /// Takes the progress line off the terminal, for something that needs the
+    /// line to itself.
+    ///
+    /// A password prompt is written where the bar is drawn, and a redraw under
+    /// the user's cursor would corrupt it. The bar is finished rather than
+    /// hidden: a hidden target stops drawing but leaves the last line standing.
+    pub fn pause(&self) {
+        self.bar.finish_and_clear();
+    }
+
+    /// Puts the line back, at the position it left off.
+    ///
+    /// `reset` is what undoes the finish: it returns the bar to `InProgress`, so
+    /// the next draw paints it again. The position is then restored, because
+    /// resetting puts it back to zero.
+    pub fn resume(&self) {
+        self.bar.reset();
+        self.bar.set_position(self.state.borrow().done as u64);
+        self.redraw();
+    }
+
     /// The line's text, as it would be drawn.
     ///
     /// How far the run has got is the template's `{pos}/{len}`, so the message

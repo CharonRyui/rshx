@@ -18,6 +18,9 @@ pub struct Host {
     pub user: Option<String>,
     pub port: Option<u16>,
     pub ip: Option<IpAddr>,
+    /// Whether this Host's remote command authenticates with a password of its
+    /// own, rather than the one password the rest of the run shares.
+    pub unique_privilege_pass: bool,
 }
 
 /// The parsed host file.
@@ -207,6 +210,7 @@ fn parse(path: &Path) -> Result<HostFile> {
                 user: entry.user.clone(),
                 port: entry.port,
                 ip: entry.ip,
+                unique_privilege_pass: entry.unique_privilege_pass,
             });
         }
     }
@@ -436,4 +440,10 @@ struct RawEntry {
     user: Option<String>,
     port: Option<u16>,
     ip: Option<IpAddr>,
+    /// Defaulted, so a host file written before this field existed still
+    /// parses. Only a Host that needs a password of its own says so; a Host
+    /// that shares the run's password needs no declaration, because rshx asks
+    /// only when a remote command asks.
+    #[serde(default)]
+    unique_privilege_pass: bool,
 }

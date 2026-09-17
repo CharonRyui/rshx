@@ -87,6 +87,21 @@ impl Reporter {
         }
     }
 
+    /// One line about rshx's own doing, before anything has run.
+    ///
+    /// Not chrome: the heading is about the run and is dropped when nobody is
+    /// watching, while a warning is about the command rshx was asked to run and
+    /// belongs wherever a run's diagnostics go. It is written through the same
+    /// stream as the rest, so `--color` decides whether it is coloured.
+    pub fn warning(&mut self, message: &str) {
+        let _ = writeln!(
+            self.stderr,
+            "rshx: {}warning:{} {message}",
+            self.styles.warn.render(),
+            self.styles.warn.render_reset()
+        );
+    }
+
     /// One line naming what is about to run, so the report has a heading.
     ///
     /// This is chrome, not report: it goes to stderr, and only when stderr is a
@@ -318,6 +333,10 @@ struct Styles {
     host: Style,
     /// The command, in the heading.
     command: Style,
+    /// The word `warning`, on a line about what rshx is doing rather than how a
+    /// Host ended. Yellow like `unreachable`, because both are worth looking at
+    /// without being a failure.
+    warn: Style,
     /// Everything a reader only looks at when they need it: a duration, a
     /// cause, the run's elapsed time.
     dim: Style,
@@ -333,6 +352,7 @@ impl Styles {
             cancelled: AnsiColor::BrightBlack.on_default(),
             host: Style::new().bold(),
             command: Style::new().bold(),
+            warn: AnsiColor::Yellow.on_default().bold(),
             dim: Style::new().dimmed(),
         }
     }

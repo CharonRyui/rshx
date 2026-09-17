@@ -6,6 +6,7 @@ pub mod cli;
 pub mod heartbeat;
 pub mod host;
 pub mod interrupt;
+pub mod privilege;
 pub mod report;
 pub mod run;
 

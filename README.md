@@ -98,6 +98,11 @@ ip = "10.0.0.7"     # -o HostName=10.0.0.7   (an IP literal, not a name)
 user = "root"       # -o User=root
 port = 2222         # -o Port=2222
 
+# A password of its own, for a host whose sudo wants a different one.
+[[hosts]]
+name = "bastion"
+unique_privilege_pass = true    # --privilege asks for this host separately
+
 # Groups name hosts, so a run can select a subset.
 [groups]
 gpu = ["gpu[01-08]"]
@@ -106,12 +111,13 @@ fleet = ["node01", "gpu"]   # a group may name other groups
 
 Field rules:
 
-| Field  | Type   | Notes |
-|--------|--------|-------|
-| `name` | string | Required. An ssh destination: selects `Host` blocks in `~/.ssh/config`. |
-| `ip`   | string | An IP literal, passed as `-o HostName=`. |
-| `user` | string | Passed as `-o User=`. |
-| `port` | integer | Passed as `-o Port=`. |
+| Field                   | Type   | Notes |
+|-------------------------|--------|-------|
+| `name`                  | string | Required. An ssh destination: selects `Host` blocks in `~/.ssh/config`. |
+| `ip`                    | string | An IP literal, passed as `-o HostName=`. |
+| `user`                  | string | Passed as `-o User=`. |
+| `port`                  | integer | Passed as `-o Port=`. |
+| `unique_privilege_pass` | bool | `--privilege` only: ask for this host's own password instead of the one the run shares. Defaults to `false`. |
 
 Overrides are `-o` options rather than a rewritten destination, so the rest of
 `~/.ssh/config` still applies to that host.
@@ -151,6 +157,70 @@ an error naming the cycle. Every selector must match at least one declared host.
 several groups are a union with each host appearing once. `-g all` selects
 every host in the file, which is also the default when `-g` is absent. `all` is
 reserved and cannot be declared as a group.
+
+## Privilege
+
+`--privilege` runs each host's command under a remote `sudo`, and answers the
+password prompt when a host's sudo asks for one.
+
+```console
+$ rshx -H hosts.toml --privilege -- systemctl restart nginx
+sudo -S -p rshx-password: systemctl restart nginx · 4 hosts
+privilege password:
+node01 ok 0.42s
+node02 ok 0.39s
+node03 ok 0.31s
+node04 unreachable 5.00s (connect)
+ssh: connect to host node04 port 22: Connection timed out
+4 hosts: 3 ok, 1 unreachable in 5.02s
+```
+
+`sudo` is put in front of the command, which is forwarded after it verbatim — a
+destination is still never read as an option, and no shell joining happens.
+rshx reads nothing of the command's own: a command that runs `sudo` itself is
+wrapped like any other, so its options mean what they always meant, one
+elevation further in — `--privilege -- sudo -u www-data psql` runs as root and
+then as `www-data`. rshx warns when it sees that, since the nesting is rarely
+what was meant. The heading names the command as it actually runs, plumbing
+included.
+
+`--privilege` elevates to root and to nothing else: there is no runas option.
+To be another user, be it from root, which needs no password to do it:
+
+```console
+$ rshx -H hosts.toml --privilege -- sh -c 'sudo -u postgres pg_dump mydb'
+```
+
+The password is asked for **once per run**, on the terminal, and written to
+each asking host's sudo on its stdin. That is why the ask is not per host: 200
+hosts would mean 200 identical questions. A host whose sudo rejects the
+password is asked about again — a rejection is the one thing that says the
+password was wrong — and the new answer goes to every host still waiting for
+one. A host whose sudo never asks, because sudoers says `NOPASSWD`, is never
+prompted for and never written to.
+
+An empty password stops the run rather than half a fleet getting a password
+that cannot work, and so does having nowhere to ask: a run with no controlling
+terminal stops the moment a host asks for one. Both are a local failure — exit
+`1`, with the reason on stderr and nothing written to any host. Ctrl-C at the
+prompt stops the run the way Ctrl-C anywhere else does. Time a host spends
+waiting at a prompt is not that host's time, so `--timeout` measures each host's
+own command rather than your typing — and only the hosts actually waiting on a
+password have their limit stopped. A host whose command runs on while another
+host's prompt is up keeps counting, and can still time out.
+
+A host that needs a password of its own says so in the host file, so the run's
+shared password is never handed to it:
+
+```toml
+[[hosts]]
+name = "bastion"
+unique_privilege_pass = true
+```
+
+A command that takes its password from an askpass program (`sudo -A`) is wrapped
+like any other, and needs no special case: the wrapper's sudo is the one that
+authenticates, and an inner `sudo -A` runs as root, where it has nothing to ask.
 
 ## Output
 
@@ -284,6 +354,11 @@ already settled keep their real status, and hosts that never started are not
 reported at all, since their command never ran. A second Ctrl-C does not wait
 out the grace period.
 
+A host waiting at a `--privilege` password prompt is not taking too long: the
+time it spends at the prompt is subtracted from what its limit measures, so a
+slow typist does not turn a healthy host into a `timeout`. The subtraction is
+per host: another host's prompt is no reason for this one to be let run long.
+
 ## Options
 
 ```
@@ -294,6 +369,7 @@ Usage: rshx [OPTIONS] -- <COMMAND>...
   -g, --groups <GROUP>...   Run only the hosts these groups select
   -q, --quiet               Hide each host's stdout
       --stderr              Show the stderr of a host that is ok
+      --privilege           Run the command as root, asking for a password when one is wanted
       --timeout <DURATION>  How long to wait for any one host, such as 30s or 5m
       --json                One JSON object per host, one per line
       --color <COLOR>       auto, always or never [default: auto]

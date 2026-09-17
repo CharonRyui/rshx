@@ -36,6 +36,15 @@ pub struct Cli {
     #[arg(long)]
     pub stderr: bool,
 
+    /// Run the command as root, with `sudo`, answering its password prompt
+    /// from the terminal when a Host asks for one. The command is wrapped
+    /// whole, so a command that runs `sudo` itself keeps its own options and
+    /// elevates a second time inside rshx's — which rshx warns about. Hosts
+    /// that need a password of their own say so in the host file, and a Host
+    /// whose sudo needs none is never prompted for.
+    #[arg(long)]
+    pub privilege: bool,
+
     /// How long to wait for any one Host before giving up on it, such as
     /// `30s` or `5m`. Without it there is no limit. A Host that times out is
     /// reported as `timeout` and its ssh is terminated; the remote command is
