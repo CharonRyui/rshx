@@ -306,16 +306,6 @@ impl Harness {
             .collect()
     }
 
-    /// When the last fake ssh ended, in nanoseconds since the epoch, on the
-    /// same clock as `SystemTime::now`.
-    pub fn last_end(&self) -> Option<u128> {
-        self.timeline()
-            .iter()
-            .filter(|tick| !tick.started)
-            .map(|tick| tick.at)
-            .max()
-    }
-
     /// The highest number of fake ssh processes that were running at once.
     pub fn peak_concurrency(&self) -> usize {
         let (peak, _) = self.concurrency();

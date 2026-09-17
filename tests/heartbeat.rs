@@ -3,13 +3,8 @@
 mod support;
 
 use std::process::Command;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use support::{Attach, Response, run, run_on_tty, screen, spawn, with_harness};
-
-/// How often the heartbeat reports, from `TICK` in `src/heartbeat.rs`. The
-/// crate is a binary, so an integration test cannot import it.
-const HEARTBEAT_TICK: Duration = Duration::from_millis(200);
 
 const SLOW_AND_QUICK: &str = "[[hosts]]\nname = \"slow01\"\n\n[[hosts]]\nname = \"slow02\"\n\n[[hosts]]\nname = \"node01\"\n";
 const ONE_SLOW: &str = "[[hosts]]\nname = \"slow01\"\n";
@@ -299,35 +294,47 @@ fn result_lines_are_intact_when_both_streams_go_to_one_file() {
 }
 
 #[test]
-fn the_heartbeat_does_not_delay_a_run_that_is_already_finished() {
+fn the_heartbeat_is_not_drawn_again_after_the_last_host_settles() {
     with_harness(|harness| {
-        // Every Host is instant, so the heartbeat has nothing to report. The
-        // run must not wait for a tick before finishing.
+        // Every Host is instant, so the run has nothing left to say once the
+        // last one is reported. Nothing may draw the heartbeat again after
+        // that: a redraw there means the run sat and waited for its next tick
+        // before ending.
         harness.respond_default(Response::ok());
         let file = harness.write("hosts.toml", SLOW_AND_QUICK);
 
-        let out = run_on_tty(
-            on_terminal(harness, &file, &["--", "true"]),
-            Attach::STDERR_ONLY,
-        );
+        // Both streams on the terminal, so the heartbeat's frames and the
+        // report's lines are one stream: their order in it is their order on
+        // the screen.
+        let out = run_on_tty(on_terminal(harness, &file, &["--", "true"]), Attach::BOTH);
 
-        assert_eq!(out.code, 0, "{}", out.stderr);
-
-        // Measured from the last Host settling, not from the start of the run:
-        // starting three processes and a terminal is allowed to take a while
-        // on a loaded machine, but once the work is done nothing may sit and
-        // wait for the next tick, and that is a whole TICK away. The stub
-        // timestamps its own exit on the same clock as SystemTime.
-        let settled = harness.last_end().expect("every Host ran");
-        let exited = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("the clock is past the epoch")
-            .as_nanos();
-        let tail = exited.saturating_sub(settled);
-        assert!(
-            tail < HEARTBEAT_TICK.as_nanos(),
-            "the run ends without waiting for the next tick: it took {tail}ns \
-             after the last Host settled"
+        assert_eq!(out.code, 0, "{}", out.stdout);
+        // Every frame says how many Hosts are done; no line of the report ever
+        // does. So the last segment that names a Host without saying `done` is
+        // the last result line, and everything from there on is what the run
+        // drew after its last Host had settled.
+        let drawn: Vec<&str> = out.stdout.split(['\r', '\n']).collect();
+        let last = drawn
+            .iter()
+            .rposition(|segment| {
+                !segment.contains("done")
+                    && ["slow01", "slow02", "node01"]
+                        .iter()
+                        .any(|host| segment.contains(host))
+            })
+            .unwrap_or_else(|| panic!("every Host is reported: {:?}", out.stdout));
+        // One frame belongs there: writing a result line takes the heartbeat
+        // off the line and puts it back. Anything more is the run drawing the
+        // heartbeat again once it had nothing left to report — a tick it
+        // waited for before ending.
+        assert_eq!(
+            drawn[last..]
+                .iter()
+                .filter(|segment| segment.contains("done"))
+                .count(),
+            1,
+            "the heartbeat is drawn once more once the run is over: {:?}",
+            out.stdout
         );
     });
 }
