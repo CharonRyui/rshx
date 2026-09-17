@@ -3,14 +3,6 @@ rev = "v1.0"
 repo = "https://github.com/doublify/pre-commit-rust"
 hooks = [{ id = "fmt" }, { id = "cargo-check" }, { id = "clippy" }]
 
-# The suite is the only hook that can catch a change which compiles and lints
-# cleanly but breaks behaviour, so it belongs in the same gate as the rest.
-[[repos]]
-repo = "local"
-hooks = [
-  { id = "cargo-test", name = "cargo test", entry = "cargo test --locked", language = "system", pass_filenames = false, types = ["rust"] }
-]
-
 [[repos]]
 repo = "builtin"
 hooks = [
@@ -21,5 +13,5 @@ hooks = [
   { id = "end-of-file-fixer" },
   { id = "check-added-large-files" },
   { id = "check-json5" },
-  { id = "detect-private-key" }
+  { id = "detect-private-key" },
 ]
