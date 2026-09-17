@@ -15,25 +15,23 @@ node04 unreachable 5.00s (connect)
 4 hosts: 2 ok, 1 failed, 1 unreachable in 5.02s
 ```
 
-Each line is one host, and hosts are reported as they settle rather than in
-host-file order. The status column is padded to the longest status, so a run
-with mixed outcomes still reads as a table rather than as ragged text.
+Each line is one host, reported as it settles rather than in host-file order.
+The status column is padded to the longest status, so a mixed run still reads as
+a table rather than as ragged text.
 
 ## Why
 
 **Connections are system `ssh`.** rshx runs `ssh` and forwards your command to
-it as arguments. `~/.ssh/config`, `ssh-agent`, `known_hosts`, `ProxyJump`,
-`ProxyCommand`, `IdentityFile`, `ControlMaster` and everything else in your ssh
-setup apply unchanged, because ssh is the one reading them. rshx implements no
-connection of its own, so it cannot drift from the ssh you already have.
+it as arguments, so `~/.ssh/config`, `ssh-agent`, `known_hosts`, `ProxyJump`,
+`ProxyCommand`, `IdentityFile`, `ControlMaster` and the rest of your ssh setup
+apply unchanged. rshx opens no connection of its own.
 
 **Hosts come from a file, not a plugin.** The host file is the only host
 source: no modules, no inventory schema, no service discovery.
 
 **Fanout is a sliding window.** At most `-f` remote commands run at once, and
-each one that finishes is immediately replaced by a pending one — the model
-pdsh uses. 1000 hosts at the default fanout never means more than 32 ssh
-processes.
+each one that finishes is replaced by a pending one. 1000 hosts at the default
+fanout never means more than 32 ssh processes.
 
 **A status never depends on parsing text.** Whether a host is `ok`, `failed` or
 `unreachable` is a pure function of ssh's exit status. Text from ssh's stderr
@@ -54,8 +52,8 @@ $ install -m 755 rshx ~/.local/bin/
 
 Each archive holds the single `rshx` binary and nothing else. The `musl` builds
 are static and run on any Linux; the `gnu` builds are dynamically linked against
-glibc. Releases cover Linux only — there is no Windows build. The only runtime
-requirement is `ssh` on `PATH`.
+glibc. Releases cover Linux only. The only runtime requirement is `ssh` on
+`PATH`.
 
 ## Quick start
 
@@ -109,8 +107,6 @@ gpu = ["gpu[01-08]"]
 fleet = ["node01", "gpu"]   # a group may name other groups
 ```
 
-Field rules:
-
 | Field                   | Type   | Notes |
 |-------------------------|--------|-------|
 | `name`                  | string | Required. An ssh destination: selects `Host` blocks in `~/.ssh/config`. |
@@ -118,9 +114,6 @@ Field rules:
 | `user`                  | string | Passed as `-o User=`. |
 | `port`                  | integer | Passed as `-o Port=`. |
 | `unique_privilege_pass` | bool | `--privilege` only: ask for this host's own password instead of the one the run shares. Defaults to `false`. |
-
-Overrides are `-o` options rather than a rewritten destination, so the rest of
-`~/.ssh/config` still applies to that host.
 
 Unknown fields are an error rather than ignored, so a typo is reported instead
 of silently dropping a host's configuration. Host names and users are
@@ -137,15 +130,13 @@ gpu[01,03,05-08]    gpu01, gpu03, gpu05 … gpu08
 rack[01-04]-node    rack01-node … rack04-node
 ```
 
-The literal text before and after the range may be anything; what a name cannot
-have is a second range, so `rack[01-04]-n[1-2]` is rejected rather than guessed
-at.
-
-The width of the lower bound as written decides the zero padding: `[1-32]`
-gives `node1`, `[01-32]` gives `node01`. Ranges must ascend, and strides are not
-supported. Anything the syntax cannot express is an error rather than a guess —
-a pattern that silently expanded to the wrong hosts would run a command
-somewhere nobody asked for. One entry expands to at most 65536 hosts.
+A name cannot have a second range, so `rack[01-04]-n[1-2]` is rejected rather
+than guessed at. The width of the lower bound as written decides the zero
+padding: `[1-32]` gives `node1`, `[01-32]` gives `node01`. Ranges must ascend,
+and strides are not supported. Anything the syntax cannot express is an error
+rather than a guess — a pattern that silently expanded to the wrong hosts would
+run a command somewhere nobody asked for. One entry expands to at most 65536
+hosts.
 
 ## Groups
 
@@ -175,14 +166,12 @@ ssh: connect to host node04 port 22: Connection timed out
 4 hosts: 3 ok, 1 unreachable in 5.02s
 ```
 
-`sudo` is put in front of the command, which is forwarded after it verbatim — a
-destination is still never read as an option, and no shell joining happens.
-rshx reads nothing of the command's own: a command that runs `sudo` itself is
-wrapped like any other, so its options mean what they always meant, one
-elevation further in — `--privilege -- sudo -u www-data psql` runs as root and
-then as `www-data`. rshx warns when it sees that, since the nesting is rarely
-what was meant. The heading names the command as it actually runs, plumbing
-included.
+`sudo` is put in front of the command, which is forwarded after it verbatim. A
+command that runs `sudo` itself is wrapped like any other, so its options mean
+what they always meant, one elevation further in — `--privilege -- sudo -u
+www-data psql` runs as root and then as `www-data`. rshx warns when it sees
+that, since the nesting is rarely what was meant. The heading names the command
+as it actually runs, plumbing included.
 
 `--privilege` elevates to root and to nothing else: there is no runas option.
 To be another user, be it from root, which needs no password to do it:
@@ -192,22 +181,17 @@ $ rshx -H hosts.toml --privilege -- sh -c 'sudo -u postgres pg_dump mydb'
 ```
 
 The password is asked for **once per run**, on the terminal, and written to
-each asking host's sudo on its stdin. That is why the ask is not per host: 200
-hosts would mean 200 identical questions. A host whose sudo rejects the
-password is asked about again — a rejection is the one thing that says the
-password was wrong — and the new answer goes to every host still waiting for
-one. A host whose sudo never asks, because sudoers says `NOPASSWD`, is never
+each asking host's sudo on its stdin — not once per host, which for 200 hosts
+would be 200 identical questions. A host whose sudo rejects the password is
+asked about again, and the new answer goes to every host still waiting for one.
+A host whose sudo never asks, because sudoers says `NOPASSWD`, is never
 prompted for and never written to.
 
 An empty password stops the run rather than half a fleet getting a password
 that cannot work, and so does having nowhere to ask: a run with no controlling
 terminal stops the moment a host asks for one. Both are a local failure — exit
 `1`, with the reason on stderr and nothing written to any host. Ctrl-C at the
-prompt stops the run the way Ctrl-C anywhere else does. Time a host spends
-waiting at a prompt is not that host's time, so `--timeout` measures each host's
-own command rather than your typing — and only the hosts actually waiting on a
-password have their limit stopped. A host whose command runs on while another
-host's prompt is up keeps counting, and can still time out.
+prompt stops the run the way Ctrl-C anywhere else does.
 
 A host that needs a password of its own says so in the host file, so the run's
 shared password is never handed to it:
@@ -218,9 +202,9 @@ name = "bastion"
 unique_privilege_pass = true
 ```
 
-A command that takes its password from an askpass program (`sudo -A`) is wrapped
-like any other, and needs no special case: the wrapper's sudo is the one that
-authenticates, and an inner `sudo -A` runs as root, where it has nothing to ask.
+A command that takes its password from an askpass program (`sudo -A`) needs no
+special case: the wrapper's sudo is the one that authenticates, and an inner
+`sudo -A` runs as root, where it has nothing to ask.
 
 ## Output
 
@@ -232,20 +216,15 @@ pipe: stdout stays machine-readable even when the run is long enough to draw a
 heartbeat.
 
 Every host's stdout is shown, folded onto its status line when it is a single
-short line and written as an indented block beneath it otherwise. An `ok` host's
-stderr is hidden: its line is the result, which is what keeps a wide run
-readable. A host that is not `ok` always shows its stderr, because that is where
-the reason is. `-q` drops the stdout too.
+line of at most 200 bytes — a line of up to 199 characters plus its newline —
+and written as an indented block beneath it otherwise. An `ok` host's stderr is
+hidden: its line is the result, which is what keeps a wide run readable. A host
+that is not `ok` always shows its stderr, because that is where the reason is.
 
 | Flag       | Effect |
 |------------|--------|
 | `-q`, `--quiet` | Hide every host's stdout. |
 | `--stderr` | Show an `ok` host's stderr. A host that is not `ok` shows it either way. |
-
-A stream that is exactly one line and at most 200 bytes — so a line of up to
-199 characters plus its newline — is folded onto the status line; anything
-longer is written as an indented block beneath it. Folding a megabyte of text
-onto one line would defeat the point of folding.
 
 Each stream is capped at 1 MiB: bytes past the cap are dropped and a marker is
 written where it was cut, so a reader is never left trusting a silently
@@ -257,11 +236,10 @@ gives plain text while the summary on stderr stays coloured. `NO_COLOR` turns
 colour off under `auto`; it is a default, not an override, so an explicit
 `--color always` still colours. `--color never` is the way to be sure.
 
-Colour marks a host's **outcome**, which is the one thing a reader scans for:
-green `ok`, red `failed`, yellow `unreachable`, magenta `timeout`, dim
-`cancelled`. Everything secondary — the duration, the cause, the run's elapsed
-time — is dimmed, and the host's name is bold rather than coloured, because the
-name says what a host is *called*, not how it ended. A host's own output is
+Colour marks a host's **outcome**, the one thing a reader scans for: green `ok`,
+red `failed`, yellow `unreachable`, magenta `timeout`, dim `cancelled`.
+Everything secondary — the duration, the cause, the run's elapsed time — is
+dimmed, and the host's name is bold rather than coloured. A host's own output is
 never coloured: it is remote bytes rshx cannot interpret, so it is passed
 through as it arrived. Every styled token is also written as plain text, so the
 report never depends on colour to be read.
@@ -302,13 +280,12 @@ du -hs /data  ·  200 hosts, fanout 32
 ⠸ 95/200 done ━━━━━━━━━━━━━━━━━━━╸───────────────────── 30 running, node096 0.4s
 ```
 
-The heading names the command and how many hosts it will run on, which `-g` can
-otherwise leave unclear until the summary; it mentions the fanout only when the
-fanout, rather than the host count, is what limits the run. The bar fills as
-hosts settle, and the spinner is the only part that moves while nothing does.
-Naming the slowest host is what tells you a run is waiting on one machine
-rather than on the network. The line is drawn to the width of the terminal, so
-it never wraps however narrow the window is.
+The line carries the spinner, how far the run has got, a bar, and what is still
+in flight — including the slowest host, which is what tells you a run is waiting
+on one machine rather than on the network. The heading names the command and how
+many hosts it will run on, mentioning the fanout only when the fanout, rather
+than the host count, is what limits the run. The line is drawn to the width of
+the terminal, so it never wraps however narrow the window is.
 
 The heartbeat is chrome, not report: it is cleared before the summary, and it
 never touches stdout.
@@ -325,7 +302,7 @@ never touches stdout.
 
 A `cause` is a best-effort explanation read from ssh's stderr — `auth`, `dns`
 or `connect` — and it never changes a status or an exit code. It is absent when
-ssh's text says nothing useful, which is the honest answer.
+ssh's text says nothing useful.
 
 ## Exit codes
 
@@ -349,30 +326,40 @@ host's ssh is terminated and reported as `timeout`; every other host carries
 on. The remote command is not stopped — rshx killed the connection, not the
 work — and it says so under the summary.
 
+A host waiting at a `--privilege` password prompt is not taking too long: the
+time it spends at the prompt is subtracted from what its limit measures, and
+only the hosts actually waiting are stopped. A host whose command runs on while
+another host's prompt is up keeps counting, and can still time out.
+
 Ctrl-C stops the run: hosts still in flight are `cancelled`, hosts that had
 already settled keep their real status, and hosts that never started are not
 reported at all, since their command never ran. A second Ctrl-C does not wait
 out the grace period.
 
-A host waiting at a `--privilege` password prompt is not taking too long: the
-time it spends at the prompt is subtracted from what its limit measures, so a
-slow typist does not turn a healthy host into a `timeout`. The subtraction is
-per host: another host's prompt is no reason for this one to be let run long.
-
 ## Options
 
+`rshx -h` prints:
+
 ```
+Run one command on many hosts over ssh
+
 Usage: rshx [OPTIONS] -- <COMMAND>...
 
+Arguments:
+  <COMMAND>...  The command to run on every host, after `--`
+
+Options:
   -H, --host-file <FILE>    The host file listing the hosts to run on
-  -f, --fanout <N>          How many remote commands to run at once [default: 32]
-  -g, --groups <GROUP>...   Run only the hosts these groups select
-  -q, --quiet               Hide each host's stdout
-      --stderr              Show the stderr of a host that is ok
-      --privilege           Run the command as root, asking for a password when one is wanted
-      --timeout <DURATION>  How long to wait for any one host, such as 30s or 5m
-      --json                One JSON object per host, one per line
-      --color <COLOR>       auto, always or never [default: auto]
+  -f, --fanout <N>          How many commands run at once; a finish is replaced by a pending one [default: 32]
+  -g, --groups <GROUP>...   Run only the Hosts these groups select. Repeatable, each value may be comma-separated; defaults to every Host in the host file
+  -q, --quiet               Hide each Host's stdout
+      --stderr              Show an `ok` Host's stderr; one that is not `ok` always shows stderr
+      --privilege           Run the command as root, with `sudo`, answering its password prompt from the terminal when a Host asks. The command is wrapped whole, so an inner `sudo` keeps its own options and elevates a second time inside rshx's; a Host that needs its own password says so in the host file
+      --timeout <DURATION>  How long to wait for any one Host, such as `30s` or `5m`; without it there is no limit. A Host that times out is reported as `timeout`, its ssh is terminated, and the remote command is not stopped
+      --json                Write one JSON object per Host, one per line, instead of the plain report. stdout carries nothing else, and the heartbeat is off
+      --color <COLOR>       When to colour the report [default: auto] [possible values: auto, always, never]
+  -h, --help                Print help (see more with '--help')
+  -V, --version             Print version
 ```
 
 The command goes after `--` and is forwarded to ssh verbatim as its own

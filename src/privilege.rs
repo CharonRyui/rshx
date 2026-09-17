@@ -1,11 +1,10 @@
 //! `--privilege`: answering a remote command that asks for a password.
 //!
-//! rshx authenticates nothing itself. It runs the command under a `sudo` of its
-//! own that reads its password from stdin (`-S`) and announces the ask with a
+//! rshx authenticates nothing itself: it runs the command under its own `sudo`
+//! that reads its password from stdin (`-S`) and announces the ask with a
 //! marker of rshx's own (`-p rshx-password:`), watches each Host's stderr for
-//! that marker, and writes the password to that Host's stdin when it appears.
-//! The ask is what triggers the prompt: a Host whose sudo needs no password
-//! never prints the marker, so rshx never asks for a password nobody wants.
+//! it, and writes the password to that Host's stdin. The marker is the only
+//! trigger, so a Host whose sudo needs no password is never asked for one.
 
 use std::collections::HashMap;
 use std::fs::OpenOptions;
@@ -19,18 +18,15 @@ use tokio::sync::Notify;
 
 /// The prompt sudo is told to print, so rshx can recognise the ask.
 ///
-/// rshx's own string rather than sudo's default, which is translated and would
-/// be recognised only on an English machine. It holds no space, so ssh's
-/// joining of the command's arguments cannot split it, and no `%`, which sudo
-/// would expand.
+/// rshx's own string, not sudo's translated default, which only an English
+/// machine prints. No space, so ssh's joining of arguments cannot split it, and
+/// no `%`, which sudo would expand.
 pub const MARKER: &str = "rshx-password:";
 
-/// The command as it is run: rshx's own sudo, then the command verbatim.
-///
-/// rshx never reads the command's own sudo options — that would mean
-/// reimplementing sudo's option grammar, and being wrong about it some day. So
-/// the command is always wrapped, and one that runs sudo itself ends up with a
-/// second elevation inside rshx's. `runs_sudo` is what lets the caller say so.
+/// The command as it is run: rshx's own sudo, then the command verbatim. Its
+/// own sudo options are never read — that would mean reimplementing sudo's
+/// option grammar, and being wrong about it some day — so a command that runs
+/// sudo itself ends up with a second elevation inside rshx's.
 pub fn under_sudo(command: &[String]) -> Vec<String> {
     let mut rewritten = Vec::with_capacity(command.len() + 4);
     rewritten.push("sudo".to_string());
@@ -41,9 +37,8 @@ pub fn under_sudo(command: &[String]) -> Vec<String> {
     rewritten
 }
 
-/// Whether the command already runs sudo itself.
-///
-/// Only ever used to warn: the wrapper is the same either way.
+/// Whether the command already runs sudo itself. Only ever a warning: the
+/// wrapper is the same either way.
 pub fn runs_sudo(command: &[String]) -> bool {
     command.first().is_some_and(|word| is_sudo(word))
 }
@@ -55,26 +50,22 @@ fn is_sudo(word: &str) -> bool {
         .is_some_and(|name| name == "sudo")
 }
 
-/// Removes rshx's marker from a Host's stderr, and reports where it was.
-///
-/// The marker is stripped rather than shown: it is rshx's own plumbing, and
-/// sudo prints it once per attempt, so a rejected password would otherwise put
-/// two `rshx-password:` lines in the report. Bytes are held back until they can
-/// no longer be the start of a marker, so a marker split across two reads is
-/// still recognised — and still stripped.
+/// Removes rshx's marker from a Host's stderr, and reports where it was. The
+/// marker is stripped rather than shown: it is rshx's own, printed once per
+/// attempt, so a rejected password would otherwise put two `rshx-password:`
+/// lines in the report. Bytes are held back until they cannot start a marker,
+/// so one split across reads is still stripped.
 #[derive(Default)]
 pub struct MarkerFilter {
-    /// The tail of the previous chunk, kept only while it could still be the
-    /// beginning of a marker.
+    /// The tail of the previous chunk, kept while a marker could still start.
     held: Vec<u8>,
 }
 
 /// What filtering one chunk of a stream held.
 #[derive(Default, Clone, Copy)]
 pub struct Filtered {
-    /// Whether this chunk carried a marker. sudo prints one per attempt, so a
-    /// rejected password produces a second ask: every one of them is a read
-    /// that wants a password written to it.
+    /// Whether this chunk carried a marker. sudo prints one per attempt, and
+    /// every attempt is a read that wants a password written to it.
     pub asked: bool,
     /// Whether bytes were dropped, because the stream is past its cap.
     pub dropped: bool,
@@ -95,8 +86,7 @@ impl MarkerFilter {
             start = at + MARKER.len();
         }
 
-        // Everything from the last marker on could still be the start of
-        // another, so only the part that cannot be is written now.
+        // Everything from the last marker on could still start another.
         let tail = &text[start..];
         let safe = safe_prefix(tail);
         filtered.dropped |= !self.keep(&tail[..safe], kept, cap);
@@ -137,10 +127,9 @@ fn safe_prefix(tail: &[u8]) -> usize {
     tail.len()
 }
 
-/// A Host's stderr reader telling the run that its command asked for a password.
-///
-/// The ask is noticed by whichever task is reading that Host's stderr, but it is
-/// answered by the main task, which owns the terminal and the heartbeat.
+/// A Host's stderr reader telling the run its command asked for a password.
+/// Noticed by whichever task reads that stderr, answered by the main task,
+/// which owns the terminal and the heartbeat.
 pub struct Request {
     pub host: String,
     /// Whether the Host is marked `unique_privilege_pass`, and so asks for a
@@ -151,31 +140,26 @@ pub struct Request {
 
 /// The passwords a run can need.
 pub struct Privilege {
-    /// The password every Host shares, and the Hosts it has already been given
-    /// to.
+    /// The password every Host shares, and the Hosts it has been given to.
     shared: Mutex<Shared>,
     /// The passwords of Hosts marked `unique_privilege_pass`.
     unique: Mutex<HashMap<String, Unique>>,
-    /// Why the run cannot go on, once it cannot: there was nowhere to ask, or
-    /// nothing was typed.
+    /// Why the run cannot go on: nowhere to ask, or nothing was typed.
     fatal: Mutex<Option<String>>,
     clock: PromptClock,
 }
 
-/// The run's shared password, and who has had it.
-///
-/// Who has had it is what tells a retry from a first ask: sudo prints the
-/// marker again only after rejecting a password, so a Host asking twice has had
-/// the one it was given refused, and writing that same password again would
-/// only burn sudo's remaining tries.
+/// The run's shared password, and who has had it. `given` tells a retry from a
+/// first ask: sudo reprints the marker only after rejecting a password, so a
+/// Host asking twice has had the one it was given refused, and writing it again
+/// would only burn sudo's remaining tries.
 #[derive(Default)]
 struct Shared {
     password: Option<Vec<u8>>,
     given: std::collections::HashSet<String>,
 }
 
-/// The password of a Host that has one of its own, and whether it has been
-/// given it yet.
+/// A Host's own password, and whether it has been given it yet.
 #[derive(Default)]
 struct Unique {
     password: Option<Vec<u8>>,
@@ -194,11 +178,9 @@ impl Default for Privilege {
 }
 
 impl Privilege {
-    /// The password this Host's command should be given, asking the user for one
-    /// if the run has none this Host has not already tried.
-    ///
-    /// The ask happens on a thread of its own: reading a password is a person
-    /// typing, which must not hold up the runtime.
+    /// The password this Host's command should be given, asking the user for
+    /// one if the run has none this Host has not already tried. The ask runs on
+    /// a thread of its own: a person typing must not hold up the runtime.
     pub async fn answer(self: &Arc<Self>, host: &str, unique: bool) -> Answer {
         if let Some(password) = self.untried(host, unique) {
             return Answer::Password(password);
@@ -220,8 +202,7 @@ impl Privilege {
     /// Asks for a password on the terminal. Blocking: it is a person typing.
     fn ask(&self, host: &str, unique: bool) -> Answer {
         // A Host asking a second time had its password refused, so the prompt
-        // says which Host it is for: with a run of Hosts with passwords of
-        // their own, the next prompt may well be about another one.
+        // names the Host: with unique passwords the next one may be another's.
         let text = format!("privilege password for {host}: ");
         match prompt(&text) {
             Typed::Password(password) => {
@@ -298,8 +279,7 @@ impl Privilege {
 
     fn fail(&self, reason: impl Into<String>) {
         let mut fatal = lock(&self.fatal);
-        // The first failure is the one worth reporting: a Host asking after it
-        // would only restate it.
+        // The first failure is what gets reported: a later one restates it.
         if fatal.is_none() {
             *fatal = Some(reason.into());
         }
@@ -314,13 +294,10 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-/// How long each Host has spent blocked on rshx for a password.
-///
-/// Per Host, not per run. Only the Hosts whose ask is out are stopped at a
-/// prompt: the rest carry on running, and a `--timeout` is a bound on what each
-/// Host's own command does. Charging one Host's ask to the whole run would let a
-/// slow typist hold a healthy Host open past its limit — or, worse, let a
-/// prompt keep a wedged Host from ever timing out.
+/// How long each Host has spent blocked on rshx for a password. Per Host,
+/// not per run: a `--timeout` bounds each Host's own command, so charging one
+/// Host's ask to the whole run would let a slow typist hold a healthy Host open
+/// past its limit, or a prompt keep a wedged Host from ever timing out.
 #[derive(Clone, Default)]
 pub struct PromptClock {
     state: Arc<ClockState>,
@@ -334,8 +311,7 @@ struct ClockState {
     changed: Notify,
 }
 
-/// What one Host has spent waiting for a password, and whether it is waiting
-/// now.
+/// What one Host has spent waiting for a password, and whether it waits now.
 #[derive(Default)]
 struct Waiting {
     /// When the ask went out, while it is still out.
@@ -345,8 +321,7 @@ struct Waiting {
 }
 
 impl PromptClock {
-    /// How long this Host has been waiting for a password, including a wait in
-    /// progress.
+    /// How long this Host has spent waiting, including a wait in progress.
     pub fn spent_by(&self, host: &str) -> Duration {
         match lock(&self.state.hosts).get(host) {
             Some(waiting) => waiting.total(),
@@ -361,8 +336,7 @@ impl PromptClock {
             .is_some_and(|waiting| waiting.since.is_some())
     }
 
-    /// Resolves once this Host is not waiting for a password, including right
-    /// now.
+    /// Resolves once this Host is not waiting for a password, including now.
     pub async fn wait_out_prompt(&self, host: &str) {
         loop {
             let changed = self.state.changed.notified();
@@ -382,12 +356,10 @@ impl PromptClock {
         self.state.changed.notified().await;
     }
 
-    /// Times this Host's ask, and wakes every waiting deadline when it goes out
-    /// and when it comes back.
-    ///
-    /// Called by the Host's own stderr reader rather than by the run's main
-    /// loop: the Host starts waiting the moment its ask goes out, whether or
-    /// not the loop has got to it.
+    /// Times this Host's ask, and wakes every waiting deadline when it goes
+    /// out or comes back. Called by the Host's own stderr reader, not the run's
+    /// main loop: the Host starts waiting the moment its ask goes out, whether
+    /// or not the loop has got to it.
     pub fn asking_now<'a>(&'a self, host: &'a str) -> Asking<'a> {
         lock(&self.state.hosts)
             .entry(host.to_string())
@@ -450,11 +422,8 @@ enum Typed {
     NoTerminal(String),
 }
 
-/// Asks for a password on the terminal, without echoing it.
-///
-/// The terminal rather than stdin: the report's own streams are often pipes —
-/// `rshx … | jq` — and a redirected stdin has to stay free for whatever put it
-/// there.
+/// Asks for a password on the terminal, without echoing it. The terminal, not
+/// stdin, which is often a pipe and has to stay free for whatever put it there.
 fn prompt(text: &str) -> Typed {
     let mut tty = match OpenOptions::new().read(true).write(true).open("/dev/tty") {
         Ok(tty) => tty,
@@ -491,8 +460,7 @@ fn prompt(text: &str) -> Typed {
     }
     drop(raw);
 
-    // The user's Enter was not echoed, so the next line would otherwise be
-    // written over the prompt.
+    // Enter was not echoed, so the next line would be written over the prompt.
     let _ = tty.write_all(b"\n");
     let _ = tty.flush();
 
@@ -504,11 +472,9 @@ fn prompt(text: &str) -> Typed {
 }
 
 /// The terminal in the mode a password is typed in: no echo, a byte at a time,
-/// and Ctrl-C delivered as a byte rather than a signal.
-///
-/// Signals off is what lets rshx restore the terminal before it stops the run:
-/// a SIGINT arriving mid-prompt would leave the user's terminal with no echo
-/// and no line editing.
+/// and Ctrl-C delivered as a byte rather than a signal. Signals off is what
+/// lets rshx restore the terminal before it stops the run; a SIGINT mid-prompt
+/// would leave it with no echo and no line editing.
 struct Raw {
     fd: RawFd,
     saved: libc::termios,
@@ -523,17 +489,13 @@ impl Raw {
             if libc::tcgetattr(fd, &mut saved) != 0 {
                 return Err(std::io::Error::last_os_error());
             }
-            // copy
             let mut raw = saved;
-            // No display for inputed chars, no buffer for read, no normal signals for tty
             raw.c_lflag &= !(libc::ECHO | libc::ICANON | libc::ISIG);
-            // Read every one byte
+            // One byte at a time, no timeout.
             raw.c_cc[libc::VMIN] = 1;
-            // No timeout
             raw.c_cc[libc::VTIME] = 0;
-            // Flushed on the way in, so a keystroke typed before the prompt
-            // cannot become part of the password.
-            // Discard anything unread before setattr
+            // TCSAFLUSH discards anything unread first, so a keystroke typed
+            // before the prompt cannot become part of the password.
             if libc::tcsetattr(fd, libc::TCSAFLUSH, &raw) != 0 {
                 return Err(std::io::Error::last_os_error());
             }
@@ -578,9 +540,8 @@ mod tests {
 
     #[test]
     fn a_command_that_runs_sudo_is_wrapped_like_any_other() {
-        // No option of the command's is read, moved or dropped: it is wrapped
-        // whole, so its own `-p` and `-u` still mean what they say, one
-        // elevation further in.
+        // The command is wrapped whole, so its own `-p` and `-u` still mean
+        // what they say, one elevation further in.
         for command in [
             argv(&["sudo", "-u", "postgres", "psql"]),
             argv(&["sudo", "-p", "Password: ", "uptime"]),
@@ -595,8 +556,7 @@ mod tests {
 
     #[test]
     fn a_command_that_runs_sudo_is_noticed() {
-        // What the warning is built on: sudo, or a path to it, as the command
-        // word.
+        // The warning is built on sudo, or a path to it, as the command word.
         for command in [
             argv(&["sudo", "uptime"]),
             argv(&["/usr/bin/sudo", "uptime"]),
@@ -635,8 +595,7 @@ mod tests {
 
     #[test]
     fn a_marker_split_across_reads_is_still_one_ask() {
-        // sudo writes the prompt in one go, but nothing promises the read
-        // returns it in one go.
+        // sudo writes the prompt in one go, but nothing promises the read does.
         let (kept, filtered) = filtered(&[b"rshx-", b"pass", b"word:x"]);
         assert_eq!(kept, b"x");
         assert!(filtered.asked);

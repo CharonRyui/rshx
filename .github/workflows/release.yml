@@ -44,10 +44,8 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      # A draft, because this repo has immutable releases enabled: once a
-      # release is published its assets cannot be added, replaced or deleted.
-      # Assets must be attached while it is still a draft, so publication is
-      # deferred to the `publish` job after every target has been built.
+      # A draft: this repo has immutable releases, so assets can only be
+      # attached before publication, which the `publish` job does last.
       - name: Create the draft release
         run: |
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
@@ -72,9 +70,8 @@ jobs:
         include:
           - target: x86_64-unknown-linux-gnu
           - target: x86_64-unknown-linux-musl
-          # aarch64 needs a cross linker. zig is the documented way to get one
-          # without a full cross toolchain; the musl builds are static, so they
-          # carry no glibc floor and run on an older fleet node.
+          # aarch64 needs a cross linker, and zig supplies one without a full
+          # cross toolchain.
           - target: aarch64-unknown-linux-gnu
             zigbuild: true
           - target: aarch64-unknown-linux-musl
@@ -119,10 +116,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
 
-  # Fan-in. `needs: build` waits for every matrix leg, so a failure in any
-  # target skips this job and the draft stays a draft rather than publishing a
-  # half-populated release. Publishing is the only irreversible step, and it is
-  # the last one.
+  # Fan-in: `needs: build` waits for every matrix leg, so any failure leaves the
+  # draft unpublished. Publishing is the irreversible step, so it goes last.
   publish:
     name: publish
     needs: build

@@ -25,7 +25,6 @@ pub const EXIT_UNREACHABLE: u8 = 4;
 /// The command line could not be understood. Not clap's default `2`, which
 /// means "a Host failed".
 pub const EXIT_USAGE: u8 = 5;
-/// The run was interrupted.
 pub const EXIT_INTERRUPTED: u8 = 99;
 
 pub fn run() -> ExitCode {
