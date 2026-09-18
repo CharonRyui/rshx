@@ -84,6 +84,10 @@ impl Reporter {
         }
     }
 
+    pub fn chrome(&self) -> bool {
+        self.chrome
+    }
+
     /// One line about rshx's own doing, before anything has run. Not chrome:
     /// the heading is about the run and is dropped when nobody is watching,
     /// while a warning is about the command rshx was asked to run.
@@ -93,6 +97,24 @@ impl Reporter {
             "rshx: {}warning:{} {message}",
             self.styles.warn.render(),
             self.styles.warn.render_reset()
+        );
+    }
+
+    pub fn info(&mut self, message: &str) {
+        let _ = writeln!(
+            self.stderr,
+            "rshx: {}info:{} {message}",
+            self.styles.info.render(),
+            self.styles.info.render_reset(),
+        );
+    }
+
+    pub fn error(&mut self, message: &str) {
+        let _ = writeln!(
+            self.stderr,
+            "rshx: {}error:{} {message}",
+            self.styles.error.render(),
+            self.styles.error.render_reset(),
         );
     }
 
@@ -314,6 +336,10 @@ struct Styles {
     /// The word `warning`, on a line about what rshx is doing rather than how a
     /// Host ended. Yellow like `unreachable`: worth looking at, not a failure.
     warn: Style,
+    /// Blue
+    info: Style,
+    /// Red
+    error: Style,
     /// A duration, a cause, the run's elapsed time: looked at only when needed.
     dim: Style,
 }
@@ -329,6 +355,8 @@ impl Styles {
             host: Style::new().bold(),
             command: Style::new().bold(),
             warn: AnsiColor::Yellow.on_default().bold(),
+            error: AnsiColor::Red.on_default().bold(),
+            info: AnsiColor::Blue.on_default().bold(),
             dim: Style::new().dimmed(),
         }
     }
