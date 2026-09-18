@@ -76,6 +76,7 @@ $ rshx -H hosts.toml -f 64 --timeout 30s run -- systemctl status kubelet
 $ rshx -H hosts.toml run --script ./collect.sh
 $ rshx -H hosts.toml --json run -- hostname | jq -r '.host'
 $ rshx -H hosts.toml ping
+$ rshx -H hosts.toml -g ascend list
 ```
 
 ## The host file
@@ -160,6 +161,74 @@ Each `-g` takes one value, so `-g web,db` and `-g web -g db` both select two
 groups while `-g web db` does not: the options come before the subcommand, and
 a second bare word there would be read as the subcommand rather than as another
 group.
+
+## Listing hosts
+
+`list` prints the hosts a run would select, and contacts none of them:
+
+```console
+$ cat hosts.toml
+[[hosts]]
+name = "web[01-02]"
+user = "deploy"
+port = 2222
+
+[[hosts]]
+name = "db01"
+ip = "10.0.0.7"
+
+[[hosts]]
+name = "bastion"
+unique_privilege_pass = true
+
+[groups]
+web = ["web[01-02]"]
+core = ["db01", "bastion"]
+
+$ rshx -H hosts.toml list
+HOST     USER    PORT  IP        OWN-PASSWORD
+web01    deploy  2222  -         -
+web02    deploy  2222  -         -
+db01     -       -     10.0.0.7  -
+bastion  -       -     -         yes
+
+$ rshx -H hosts.toml -g core list
+HOST     IP        OWN-PASSWORD
+db01     10.0.0.7  -
+bastion  -         yes
+```
+
+It takes the same `-H` and `-g` as a run, so a listing is the cheap way to see
+what a group selects — or what a pattern expanded to — before committing to a
+run. The hosts come out in host-file order, with each host's overrides beside
+it.
+
+A column appears only when some listed host fills it, so a file of bare names
+lists bare names:
+
+```console
+$ rshx -H hosts.toml list
+node01
+node02
+node03
+node04
+```
+
+`--json` writes one object per host instead, with the host file's field names
+and a field omitted when the host does not set it:
+
+```console
+$ rshx -H hosts.toml --json list
+{"host":"web01","user":"deploy","port":2222,"unique_privilege_pass":false}
+{"host":"web02","user":"deploy","port":2222,"unique_privilege_pass":false}
+{"host":"db01","ip":"10.0.0.7","unique_privilege_pass":false}
+{"host":"bastion","unique_privilege_pass":true}
+```
+
+A listing is not a report: no host has a status, because no host did anything.
+stdout carries the listing and nothing else, so `rshx list > hosts.txt` gives a
+file of names, and the exit code is `0` unless the host file or the selection
+was itself an error.
 
 ## Privilege
 
@@ -412,6 +481,7 @@ Usage: rshx [OPTIONS] <COMMAND>
 Commands:
   run   Run command or script on hosts
   ping  Check all hosts are available
+  list  List the Hosts a run would select, without contacting any of them
   help  Print this message or the help of the given subcommand(s)
 
 Options:
@@ -444,6 +514,11 @@ Options:
 ```
 
 Exactly one of the two is given: a command after `--`, or `--script FILE`.
+
+`ping` and `list` take no arguments of their own: everything they answer from
+is in the options above. A run's options that shape a command — `-f`, `-q`,
+`--stderr`, `--privilege`, `--timeout` — have nothing to shape in a listing,
+which runs nothing, and are accepted and ignored there.
 
 The command goes after `--` and is forwarded to ssh verbatim as its own
 arguments — rshx does no shell joining, so ssh does it, exactly as it would if

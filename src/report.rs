@@ -26,7 +26,9 @@ pub enum ColorWhen {
 }
 
 /// A stream that colours from its own terminal, unless `--color` overrides.
-fn stream<T: anstream::stream::RawStream>(when: ColorWhen, raw: T) -> AutoStream<T> {
+/// Shared with the listing, which is not a report but answers to `--color`
+/// just the same.
+pub(crate) fn stream<T: anstream::stream::RawStream>(when: ColorWhen, raw: T) -> AutoStream<T> {
     match when {
         ColorWhen::Auto => AutoStream::auto(raw),
         ColorWhen::Always => AutoStream::always(raw),

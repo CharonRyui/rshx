@@ -3,39 +3,12 @@ use std::{process::Stdio, time::Duration};
 use anyhow::Result;
 
 use crate::{
-    cli::{CliCommand, CliOptions},
+    cli::CliOptions,
     host::Host,
     interrupt::Interrupt,
-    privilege,
     report::Reporter,
     run::{Outcome, Prompts, construct_ssh_basic_cmd, execute_on_hosts, run_remote_command},
 };
-
-pub(super) fn generate_command(
-    options: &CliOptions,
-    subcommand: &CliCommand,
-) -> Result<Vec<String>> {
-    let command = match &subcommand {
-        CliCommand::Run(args) => {
-            if !args.command.is_empty() {
-                if options.privilege {
-                    // A command that runs sudo itself gets rshx's sudo in front of it and
-                    // elevates a second time: rshx reads none of the command's own options —
-                    // that would mean knowing sudo's grammar — so it warns rather than guesses.
-                    privilege::under_sudo(&args.command)
-                } else {
-                    args.command.clone()
-                }
-            } else {
-                unreachable!()
-            }
-        }
-        CliCommand::Ping => {
-            vec!["echo".to_string(), "pong".to_string()]
-        }
-    };
-    Ok(command)
-}
 
 pub(super) async fn execute_command(
     selected: &Vec<&Host>,

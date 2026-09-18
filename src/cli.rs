@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand};
 
-/// Operations to execute on hosts
+/// What rshx was asked to do
 #[derive(Debug, Subcommand)]
 pub enum CliCommand {
     /// Run command or script on hosts
@@ -10,6 +10,9 @@ pub enum CliCommand {
 
     /// Check all hosts are available
     Ping,
+
+    /// List the Hosts a run would select, without contacting any of them
+    List,
 }
 
 #[derive(Debug, Args)]

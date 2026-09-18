@@ -1,4 +1,5 @@
-//! Running the command on Hosts, and deciding what the run's outcome means.
+//! Running the command on Hosts, listing the Hosts a run would select, and
+//! deciding what a run's outcome means.
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -21,6 +22,7 @@ use crate::run::script::execute_local_script;
 use crate::{EXIT_FAILED, EXIT_INTERRUPTED, EXIT_LOCAL, EXIT_OK, EXIT_UNREACHABLE};
 
 mod command;
+mod list;
 mod script;
 
 /// The terminal outcome of one Host's command.
@@ -105,18 +107,70 @@ impl Outcome {
     }
 }
 
-/// Runs the command on every selected Host and reports as they settle.
+/// Loads the host file, then answers the subcommand the command line asked for.
 pub async fn execute(cli: &Cli) -> Result<u8> {
     let options = &cli.options;
     let path = host::resolve_path(options.host_file.as_deref())?;
     let file = host::load(&path)?;
     let selected = file.select(&options.groups)?;
 
-    // Chrome goes on stderr, and only when a terminal is watching it: a
-    // redirected stderr must stay free of it, and `--json` must be parseable.
-    let chrome = !options.json && std::io::IsTerminal::is_terminal(&std::io::stderr());
+    match &cli.sub_command {
+        // `list` answers from the host file alone: nothing runs, so no Host has
+        // an outcome, and a listing is not a report.
+        CliCommand::List => list::execute(&selected, options),
 
-    let mut reporter = report::Reporter::new(
+        CliCommand::Run(args) => {
+            let mut reporter = reporter(options);
+
+            // A script is copied to each Host and run there.
+            if let Some(script_path) = &args.script {
+                return execute_local_script(&selected, script_path, options, &mut reporter).await;
+            }
+
+            // A command is handed to each Host's own ssh to run.
+            let command = if options.privilege {
+                // A command that runs sudo itself gets rshx's sudo in front of it and
+                // elevates a second time: rshx reads none of the command's own options —
+                // that would mean knowing sudo's grammar — so it warns rather than guesses.
+                privilege::under_sudo(&args.command)
+            } else {
+                args.command.clone()
+            };
+
+            // `--privilege` wraps the command once, before anything runs, so every Host
+            // gets that same command: a remote sudo reads its password from stdin.
+            // Before the heading, so what rshx says about the command is read first.
+            // Asked of the command as it was typed: `command` is already wrapped, and
+            // its own leading `sudo` is rshx's.
+            if options.privilege && privilege::runs_sudo(&args.command) {
+                reporter.warning(
+                    "the command runs sudo itself; --privilege puts its own sudo in front of it",
+                );
+            }
+
+            execute_command(&selected, &command, options, &mut reporter).await
+        }
+
+        CliCommand::Ping => {
+            let mut reporter = reporter(options);
+
+            execute_command(
+                &selected,
+                &["echo".to_string(), "pong".to_string()],
+                options,
+                &mut reporter,
+            )
+            .await
+        }
+    }
+}
+
+/// The reporter a run writes through. Chrome goes on stderr, and only when a
+/// terminal is watching it: a redirected stderr must stay free of it, and
+/// `--json` must be parseable.
+fn reporter(options: &CliOptions) -> Reporter {
+    let chrome = !options.json && std::io::IsTerminal::is_terminal(&std::io::stderr());
+    Reporter::new(
         options.color,
         report::Detail {
             stdout: !options.quiet,
@@ -128,30 +182,7 @@ pub async fn execute(cli: &Cli) -> Result<u8> {
             report::Format::Plain
         },
         chrome,
-    );
-
-    if let CliCommand::Run(args) = &cli.sub_command
-        && let Some(script_path) = &args.script
-    {
-        return execute_local_script(&selected, script_path, options, &mut reporter).await;
-    }
-
-    let command = command::generate_command(options, &cli.sub_command)?;
-
-    // `--privilege` wraps the command once, before anything runs, so every Host
-    // gets that same command: a remote sudo reads its password from stdin.
-    // Before the heading, so what rshx says about the command is read first.
-    // Asked of the command as it was typed: `command` is already wrapped, and
-    // its own leading `sudo` is rshx's.
-    if let CliCommand::Run(args) = &cli.sub_command
-        && options.privilege
-        && privilege::runs_sudo(&args.command)
-    {
-        reporter
-            .warning("the command runs sudo itself; --privilege puts its own sudo in front of it");
-    }
-
-    return execute_command(&selected, &command, options, &mut reporter).await;
+    )
 }
 
 /// The passwords a run asks for, and where a Host's stderr reader asks. Held
