@@ -28,16 +28,21 @@ everything = ["web[01-03]", "db01", "db02", "cache01"]
 /// Runs rshx over `ESTATE` with the given `-g` values and returns the Hosts it
 /// actually ran on, in the order the fake ssh saw them.
 fn select(groups: &[&str]) -> Result<Vec<String>, (i32, String)> {
+    let flags: Vec<&str> = groups.iter().flat_map(|group| ["-g", *group]).collect();
+    hosts_for(&flags)
+}
+
+/// Runs rshx over `ESTATE` with the given flags, and returns the Hosts it ran
+/// on, in the order the fake ssh saw them.
+fn hosts_for(flags: &[&str]) -> Result<Vec<String>, (i32, String)> {
     let harness = support::Harness::new();
     harness.respond_default(Response::ok());
     let file = harness.write("hosts.toml", ESTATE);
 
     let mut cmd = harness.rshx();
     cmd.args(["-H", file.to_str().unwrap(), "-f", "1"]);
-    for group in groups {
-        cmd.args(["-g", group]);
-    }
-    cmd.args(["--", "hostname"]);
+    cmd.args(flags);
+    cmd.args(["run", "--", "hostname"]);
     let out = run(cmd);
 
     let hosts: Vec<String> = harness
@@ -88,11 +93,7 @@ fn several_groups_are_a_union_with_each_host_once() {
 fn a_comma_separated_list_is_the_same_as_repeating_the_flag() {
     assert_eq!(
         select(&["web,db"]).unwrap(),
-        select(&["web", "-g", "db"]).unwrap_or_else(|_| select(&["web", "db"]).unwrap())
-    );
-    assert_eq!(
-        select(&["web,db"]).unwrap(),
-        select(&["web", "db"]).unwrap()
+        hosts_for(&["-g", "web", "-g", "db"]).unwrap()
     );
 }
 
@@ -142,6 +143,7 @@ both = ["left", "right"]
                 "both",
                 "-f",
                 "1",
+                "run",
                 "--",
                 "hostname",
             ]);
@@ -194,7 +196,15 @@ c = ["a"]
 
         let out = run({
             let mut cmd = harness.rshx();
-            cmd.args(["-H", file.to_str().unwrap(), "-g", "a", "--", "hostname"]);
+            cmd.args([
+                "-H",
+                file.to_str().unwrap(),
+                "-g",
+                "a",
+                "run",
+                "--",
+                "hostname",
+            ]);
             cmd
         });
 
@@ -217,7 +227,15 @@ fn an_unknown_group_is_an_error_listing_the_known_ones() {
         let file = harness.write("hosts.toml", ESTATE);
         let out = run({
             let mut cmd = harness.rshx();
-            cmd.args(["-H", file.to_str().unwrap(), "-g", "nope", "--", "hostname"]);
+            cmd.args([
+                "-H",
+                file.to_str().unwrap(),
+                "-g",
+                "nope",
+                "run",
+                "--",
+                "hostname",
+            ]);
             cmd
         });
 
@@ -252,7 +270,15 @@ typo = ["db0"]
         for (group, missing) in [("web", "web[01-03]"), ("typo", "db0")] {
             let out = run({
                 let mut cmd = harness.rshx();
-                cmd.args(["-H", file.to_str().unwrap(), "-g", group, "--", "hostname"]);
+                cmd.args([
+                    "-H",
+                    file.to_str().unwrap(),
+                    "-g",
+                    group,
+                    "run",
+                    "--",
+                    "hostname",
+                ]);
                 cmd
             });
 
@@ -288,7 +314,15 @@ all = ["node01"]
 
         let out = run({
             let mut cmd = harness.rshx();
-            cmd.args(["-H", file.to_str().unwrap(), "-g", "all", "--", "hostname"]);
+            cmd.args([
+                "-H",
+                file.to_str().unwrap(),
+                "-g",
+                "all",
+                "run",
+                "--",
+                "hostname",
+            ]);
             cmd
         });
 
@@ -326,7 +360,7 @@ fn groups_are_resolved_against_the_file_that_h_chose() {
         for (file, expected) in [("a.toml", "from-a"), ("b.toml", "from-b")] {
             let out = run({
                 let mut cmd = harness.rshx();
-                cmd.args(["-H", file, "-g", "g", "--", "hostname"]);
+                cmd.args(["-H", file, "-g", "g", "run", "--", "hostname"]);
                 cmd
             });
             assert_eq!(out.code, 0, "{file}: {}", out.stderr);
@@ -363,6 +397,7 @@ some = ["node01", "node[02-03]"]
                 "some",
                 "-f",
                 "1",
+                "run",
                 "--",
                 "hostname",
             ]);

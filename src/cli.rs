@@ -1,11 +1,22 @@
 use std::path::PathBuf;
 
-use clap::Parser;
+use clap::{Args, Parser, Subcommand};
 
-/// Run one command on many hosts over ssh.
-#[derive(Debug, Parser)]
-#[command(name = "rshx", version, about, max_term_width = 100)]
-pub struct Cli {
+/// What rshx was asked to do
+#[derive(Debug, Subcommand)]
+pub enum CliCommand {
+    /// Run command or script on hosts
+    Run(CliRunArgs),
+
+    /// Check all hosts are available
+    Ping,
+
+    /// List the Hosts a run would select, without contacting any of them
+    List,
+}
+
+#[derive(Debug, Args)]
+pub struct CliOptions {
     /// The host file listing the hosts to run on.
     #[arg(short = 'H', long, value_name = "FILE")]
     pub host_file: Option<PathBuf>,
@@ -15,14 +26,9 @@ pub struct Cli {
     pub fanout: u32,
 
     /// Run only the Hosts these groups select. Repeatable, each value may be
-    /// comma-separated; defaults to every Host in the host file.
-    #[arg(
-        short = 'g',
-        long,
-        value_name = "GROUP",
-        value_delimiter = ',',
-        num_args = 1..
-    )]
+    /// comma-separated; defaults to every Host in the host file. One value per
+    /// occurrence: a group name is never read as the subcommand.
+    #[arg(short = 'g', long, value_name = "GROUP", value_delimiter = ',')]
     pub groups: Vec<String>,
 
     /// Hide each Host's stdout.
@@ -54,14 +60,38 @@ pub struct Cli {
     /// When to colour the report.
     #[arg(long, value_enum, default_value_t = crate::report::ColorWhen::Auto)]
     pub color: crate::report::ColorWhen,
+}
+
+#[derive(Debug, Args)]
+#[group(required = true, multiple = false)]
+pub struct CliRunArgs {
+    /// Script file to run on every Host
+    ///
+    /// The script is copied to a temporary file on the Host, made executable,
+    /// run, and removed again. It runs as the Host's user, or as root under
+    /// `--privilege`.
+    #[arg(long, value_name = "SCRIPT_PATH")]
+    pub script: Option<PathBuf>,
 
     /// The command to run on every host, after `--`.
     #[arg(
         last = true,
-        required = true,
         num_args = 1..,
         value_name = "COMMAND",
         allow_hyphen_values = true
     )]
     pub command: Vec<String>,
+}
+
+/// Run operations on many hosts over ssh.
+#[derive(Debug, Parser)]
+#[command(name = "rshx", version, about, max_term_width = 100)]
+pub struct Cli {
+    /// Cli general options
+    #[command(flatten)]
+    pub options: CliOptions,
+
+    /// subcommand for operation
+    #[command(subcommand)]
+    pub sub_command: CliCommand,
 }

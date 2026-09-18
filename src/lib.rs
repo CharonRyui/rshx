@@ -1,5 +1,5 @@
-//! rshx: run one command on many hosts over ssh, with a bounded fanout and a
-//! readable per-host report.
+//! rshx: run one command, or one script, on many hosts over ssh, with a bounded
+//! fanout and a readable per-host report.
 
 pub mod cause;
 pub mod cli;

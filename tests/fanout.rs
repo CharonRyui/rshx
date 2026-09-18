@@ -27,7 +27,15 @@ fn fanout_caps_how_many_commands_run_at_once() {
         let (out, elapsed) = timed(|| {
             run({
                 let mut cmd = harness.rshx();
-                cmd.args(["-H", file.to_str().unwrap(), "-f", "2", "--", "hostname"]);
+                cmd.args([
+                    "-H",
+                    file.to_str().unwrap(),
+                    "-f",
+                    "2",
+                    "run",
+                    "--",
+                    "hostname",
+                ]);
                 cmd
             })
         });
@@ -73,7 +81,15 @@ fn fanout_one_runs_hosts_strictly_one_at_a_time() {
 
         let out = run({
             let mut cmd = harness.rshx();
-            cmd.args(["-H", file.to_str().unwrap(), "-f", "1", "--", "hostname"]);
+            cmd.args([
+                "-H",
+                file.to_str().unwrap(),
+                "-f",
+                "1",
+                "run",
+                "--",
+                "hostname",
+            ]);
             cmd
         });
 
@@ -96,7 +112,15 @@ fn a_finished_host_is_replaced_immediately() {
 
         let out = run({
             let mut cmd = harness.rshx();
-            cmd.args(["-H", file.to_str().unwrap(), "-f", "2", "--", "hostname"]);
+            cmd.args([
+                "-H",
+                file.to_str().unwrap(),
+                "-f",
+                "2",
+                "run",
+                "--",
+                "hostname",
+            ]);
             cmd
         });
 
@@ -138,7 +162,15 @@ fn results_are_reported_as_hosts_settle_not_in_host_file_order() {
 
         let out = run({
             let mut cmd = harness.rshx();
-            cmd.args(["-H", file.to_str().unwrap(), "-f", "8", "--", "hostname"]);
+            cmd.args([
+                "-H",
+                file.to_str().unwrap(),
+                "-f",
+                "8",
+                "run",
+                "--",
+                "hostname",
+            ]);
             cmd
         });
 
@@ -174,7 +206,7 @@ fn the_default_fanout_is_thirty_two() {
         let (out, elapsed) = timed(|| {
             run({
                 let mut cmd = harness.rshx();
-                cmd.args(["-H", file.to_str().unwrap(), "--", "hostname"]);
+                cmd.args(["-H", file.to_str().unwrap(), "run", "--", "hostname"]);
                 cmd
             })
         });
@@ -200,7 +232,15 @@ fn a_fanout_below_one_is_a_usage_error() {
 
         let zero = run({
             let mut cmd = harness.rshx();
-            cmd.args(["-H", file.to_str().unwrap(), "-f", "0", "--", "hostname"]);
+            cmd.args([
+                "-H",
+                file.to_str().unwrap(),
+                "-f",
+                "0",
+                "run",
+                "--",
+                "hostname",
+            ]);
             cmd
         });
         assert_eq!(
@@ -215,7 +255,15 @@ fn a_fanout_below_one_is_a_usage_error() {
 
         let negative = run({
             let mut cmd = harness.rshx();
-            cmd.args(["-H", file.to_str().unwrap(), "-f", "-1", "--", "hostname"]);
+            cmd.args([
+                "-H",
+                file.to_str().unwrap(),
+                "-f",
+                "-1",
+                "run",
+                "--",
+                "hostname",
+            ]);
             cmd
         });
         assert_eq!(negative.code, 5, "{}", negative.stderr);
@@ -233,7 +281,15 @@ fn exit_codes_hold_when_hosts_finish_out_of_order() {
 
         let out = run({
             let mut cmd = harness.rshx();
-            cmd.args(["-H", file.to_str().unwrap(), "-f", "8", "--", "hostname"]);
+            cmd.args([
+                "-H",
+                file.to_str().unwrap(),
+                "-f",
+                "8",
+                "run",
+                "--",
+                "hostname",
+            ]);
             cmd
         });
 
@@ -260,7 +316,15 @@ fn exit_codes_hold_when_hosts_finish_out_of_order() {
         harness.respond("node03", Response::ok());
         let all_ok = run({
             let mut cmd = harness.rshx();
-            cmd.args(["-H", file.to_str().unwrap(), "-f", "8", "--", "hostname"]);
+            cmd.args([
+                "-H",
+                file.to_str().unwrap(),
+                "-f",
+                "8",
+                "run",
+                "--",
+                "hostname",
+            ]);
             cmd
         });
         assert_eq!(all_ok.code, 0, "{}", all_ok.stderr);
@@ -269,7 +333,15 @@ fn exit_codes_hold_when_hosts_finish_out_of_order() {
         harness.respond("node05", Response::failed(9).delay_ms(20));
         let one_failed = run({
             let mut cmd = harness.rshx();
-            cmd.args(["-H", file.to_str().unwrap(), "-f", "8", "--", "hostname"]);
+            cmd.args([
+                "-H",
+                file.to_str().unwrap(),
+                "-f",
+                "8",
+                "run",
+                "--",
+                "hostname",
+            ]);
             cmd
         });
         assert_eq!(
@@ -282,7 +354,15 @@ fn exit_codes_hold_when_hosts_finish_out_of_order() {
         harness.respond("node06", Response::unreachable().delay_ms(20));
         let one_unreachable = run({
             let mut cmd = harness.rshx();
-            cmd.args(["-H", file.to_str().unwrap(), "-f", "8", "--", "hostname"]);
+            cmd.args([
+                "-H",
+                file.to_str().unwrap(),
+                "-f",
+                "8",
+                "run",
+                "--",
+                "hostname",
+            ]);
             cmd
         });
         assert_eq!(
@@ -301,7 +381,7 @@ fn the_summary_reports_the_run_duration() {
 
         let out = run({
             let mut cmd = harness.rshx();
-            cmd.args(["-H", file.to_str().unwrap(), "--", "hostname"]);
+            cmd.args(["-H", file.to_str().unwrap(), "run", "--", "hostname"]);
             cmd
         });
 

@@ -75,7 +75,7 @@ fn ctrl_c_cancels_the_hosts_in_flight_and_exits_99() {
     with_harness(|harness| {
         // Slow enough that the interrupt lands while they are all running.
         harness.respond_default(Response::ok().delay_ms(30_000));
-        let child = start(harness, &["-f", "3", "--", "sleep 30"]);
+        let child = start(harness, &["-f", "3", "run", "--", "sleep 30"]);
 
         wait_until("all three hosts to be in flight", || {
             harness.processes().len() == 3
@@ -101,7 +101,7 @@ fn ctrl_c_cancels_the_hosts_in_flight_and_exits_99() {
 fn a_cancelled_host_is_not_a_failure() {
     with_harness(|harness| {
         harness.respond_default(Response::ok().delay_ms(30_000));
-        let child = start(harness, &["-f", "3", "--", "sleep 30"]);
+        let child = start(harness, &["-f", "3", "run", "--", "sleep 30"]);
         wait_until("all three hosts to be in flight", || {
             harness.processes().len() == 3
         });
@@ -129,7 +129,7 @@ fn a_second_ctrl_c_does_not_wait_out_the_grace_period() {
         // not die from it until the shell exits. It is the SIGKILL that ends
         // this run, so the second interrupt is what makes it prompt.
         harness.respond_default(Response::ok().delay_ms(30_000));
-        let child = start(harness, &["-f", "3", "--", "sleep 30"]);
+        let child = start(harness, &["-f", "3", "run", "--", "sleep 30"]);
         wait_until("all three hosts to be in flight", || {
             harness.processes().len() == 3
         });
@@ -155,7 +155,7 @@ fn ctrl_c_stops_new_hosts_from_starting() {
         harness.respond_default(Response::ok().delay_ms(30_000));
         // Two at a time: with three hosts, one is still waiting for a slot
         // when the interrupt arrives.
-        let child = start(harness, &["-f", "2", "--", "sleep 30"]);
+        let child = start(harness, &["-f", "2", "run", "--", "sleep 30"]);
         wait_until("two hosts to be in flight", || {
             harness.processes().len() == 2
         });
@@ -189,7 +189,7 @@ fn hosts_that_already_settled_keep_their_real_status() {
         harness.respond("node02", Response::ok().delay_ms(30_000));
         harness.respond("node03", Response::ok().delay_ms(30_000));
 
-        let child = start(harness, &["-f", "3", "--", "du -hs /data"]);
+        let child = start(harness, &["-f", "3", "run", "--", "du -hs /data"]);
         wait_until(
             "the settled host's line and the slow hosts to be running",
             || harness.processes().len() == 3,
@@ -230,7 +230,7 @@ fn hosts_that_already_settled_keep_their_real_status() {
 fn the_report_says_the_remote_command_may_still_be_running() {
     with_harness(|harness| {
         harness.respond_default(Response::ok().delay_ms(30_000));
-        let child = start(harness, &["-f", "3", "--", "sleep 30"]);
+        let child = start(harness, &["-f", "3", "run", "--", "sleep 30"]);
         wait_until("all three hosts to be in flight", || {
             harness.processes().len() == 3
         });
@@ -252,7 +252,7 @@ fn the_report_says_the_remote_command_may_still_be_running() {
 fn a_cancelled_host_reports_no_exit_code() {
     with_harness(|harness| {
         harness.respond_default(Response::ok().delay_ms(30_000));
-        let child = start(harness, &["-f", "3", "--json", "--", "sleep 30"]);
+        let child = start(harness, &["-f", "3", "--json", "run", "--", "sleep 30"]);
         wait_until("all three hosts to be in flight", || {
             harness.processes().len() == 3
         });
@@ -279,7 +279,7 @@ fn a_run_that_is_never_interrupted_is_unaffected() {
 
         let out = run({
             let mut cmd = harness.rshx();
-            cmd.args(["-H", file.to_str().unwrap(), "-f", "3", "--", "true"]);
+            cmd.args(["-H", file.to_str().unwrap(), "-f", "3", "run", "--", "true"]);
             cmd
         });
 
@@ -301,7 +301,7 @@ fn each_ssh_child_runs_in_its_own_process_group() {
 
         let out = run({
             let mut cmd = harness.rshx();
-            cmd.args(["-H", file.to_str().unwrap(), "-f", "3", "--", "true"]);
+            cmd.args(["-H", file.to_str().unwrap(), "-f", "3", "run", "--", "true"]);
             cmd
         });
         assert_eq!(out.code, 0, "{}", out.stderr);
@@ -332,7 +332,7 @@ fn the_interrupt_reaches_only_rshx() {
         // would die before rshx could report them as cancelled, and the
         // summary would be missing a Host.
         harness.respond_default(Response::ok().delay_ms(30_000));
-        let child = start(harness, &["-f", "3", "--", "sleep 30"]);
+        let child = start(harness, &["-f", "3", "run", "--", "sleep 30"]);
         wait_until("all three hosts to be in flight", || {
             harness.processes().len() == 3
         });
@@ -365,7 +365,7 @@ fn the_interrupt_reaches_only_rshx() {
 fn a_line_oriented_consumer_sees_the_cancellation_arrive() {
     with_harness(|harness| {
         harness.respond_default(Response::ok().delay_ms(30_000));
-        let mut child = start(harness, &["-f", "3", "--json", "--", "sleep 30"]);
+        let mut child = start(harness, &["-f", "3", "--json", "run", "--", "sleep 30"]);
         let stdout = child.stdout.take().expect("piped");
         let mut lines = BufReader::new(stdout).lines();
 

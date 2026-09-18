@@ -156,17 +156,35 @@ fn the_harness_adds_no_dependencies_of_its_own() {
 #[test]
 fn the_source_tree_has_no_leftover_placeholder_modules() {
     // An earlier layout was abandoned: module directories with nothing in them
-    // and a host-loading stub with no caller. Flat modules are what is left.
+    // and a host-loading stub with no caller. A directory that holds no module
+    // is what is left of that; a module that outgrew one file is `foo.rs` with
+    // `foo/` beside it, which is a module, not a placeholder.
     let src = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/src"));
-    let dirs: Vec<std::path::PathBuf> = std::fs::read_dir(src)
-        .expect("src")
-        .map(|entry| entry.expect("entry").path())
-        .filter(|path| path.is_dir())
-        .collect();
+    let mut empty = Vec::new();
+    let mut stack = vec![src.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let entries: Vec<std::path::PathBuf> = std::fs::read_dir(&dir)
+            .expect("src")
+            .map(|entry| entry.expect("entry").path())
+            .collect();
+        let subdirs: Vec<std::path::PathBuf> = entries
+            .iter()
+            .filter(|path| path.is_dir())
+            .cloned()
+            .collect();
+        let modules = entries
+            .iter()
+            .filter(|path| path.extension().is_some_and(|ext| ext == "rs"))
+            .count();
+        if modules == 0 && subdirs.is_empty() {
+            empty.push(dir);
+        }
+        stack.extend(subdirs);
+    }
 
     assert!(
-        dirs.is_empty(),
-        "src/ holds no subdirectories, only modules: {dirs:?}"
+        empty.is_empty(),
+        "src/ holds no directory without a module in it: {empty:?}"
     );
 }
 
@@ -188,7 +206,7 @@ fn every_invocation_is_recorded_as_one_intact_record() {
         let command = ["uptime", "-p", "--since", "1 day ago"];
         let out = run({
             let mut cmd = harness.rshx();
-            cmd.args(["-H", file.to_str().unwrap(), "--"]);
+            cmd.args(["-H", file.to_str().unwrap(), "run", "--"]);
             cmd.args(command);
             cmd
         });

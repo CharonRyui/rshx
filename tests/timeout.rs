@@ -30,7 +30,11 @@ fn a_host_that_outlives_the_limit_times_out_and_the_run_moves_on() {
         let file = harness.write("hosts.toml", THREE);
 
         let started = Instant::now();
-        let out = run(rshx(harness, &file, &["--timeout", "1s", "--", "sleep 30"]));
+        let out = run(rshx(
+            harness,
+            &file,
+            &["--timeout", "1s", "run", "--", "sleep 30"],
+        ));
         let elapsed = started.elapsed();
 
         assert!(
@@ -56,7 +60,11 @@ fn hosts_that_finish_inside_the_limit_are_untouched() {
         harness.respond_default(Response::ok().stdout("done\n").delay_ms(100));
         let file = harness.write("hosts.toml", THREE);
 
-        let out = run(rshx(harness, &file, &["--timeout", "10s", "--", "true"]));
+        let out = run(rshx(
+            harness,
+            &file,
+            &["--timeout", "10s", "run", "--", "true"],
+        ));
 
         assert_eq!(out.code, 0, "{}", out.stderr);
         assert_eq!(
@@ -78,7 +86,11 @@ fn a_run_where_every_host_times_out_exits_4() {
         harness.respond_default(Response::ok().delay_ms(30_000));
         let file = harness.write("hosts.toml", THREE);
 
-        let out = run(rshx(harness, &file, &["--timeout", "1s", "--", "sleep 30"]));
+        let out = run(rshx(
+            harness,
+            &file,
+            &["--timeout", "1s", "run", "--", "sleep 30"],
+        ));
 
         assert_eq!(
             out.code, 4,
@@ -105,7 +117,7 @@ fn timeout_and_unreachable_are_told_apart_in_the_report() {
         harness.respond("node03", Response::ok());
         let file = harness.write("hosts.toml", THREE);
 
-        let out = run(rshx(harness, &file, &["--timeout", "1s", "--", "x"]));
+        let out = run(rshx(harness, &file, &["--timeout", "1s", "run", "--", "x"]));
 
         assert!(out.stdout.contains("node01 timeout"), "{:?}", out.stdout);
         assert!(
@@ -141,7 +153,7 @@ fn a_timed_out_host_reports_no_exit_code() {
         let out = run(rshx(
             harness,
             &file,
-            &["--timeout", "1s", "--json", "--", "sleep 30"],
+            &["--timeout", "1s", "--json", "run", "--", "sleep 30"],
         ));
 
         assert_eq!(out.code, 4, "{}", out.stderr);
@@ -163,7 +175,11 @@ fn durations_are_read_the_way_humantime_writes_them() {
         let file = harness.write("hosts.toml", THREE);
 
         for duration in ["30s", "5m", "1h", "500ms", "2m30s"] {
-            let out = run(rshx(harness, &file, &["--timeout", duration, "--", "true"]));
+            let out = run(rshx(
+                harness,
+                &file,
+                &["--timeout", duration, "run", "--", "true"],
+            ));
             assert_eq!(out.code, 0, "--timeout {duration}: {}", out.stderr);
         }
     });
@@ -176,7 +192,11 @@ fn a_malformed_duration_is_a_usage_error() {
         let file = harness.write("hosts.toml", THREE);
 
         for duration in ["soon", "30", "-5s", ""] {
-            let out = run(rshx(harness, &file, &["--timeout", duration, "--", "true"]));
+            let out = run(rshx(
+                harness,
+                &file,
+                &["--timeout", duration, "run", "--", "true"],
+            ));
             assert_eq!(
                 out.code, 5,
                 "--timeout {duration:?} is a usage error: {}",
@@ -194,7 +214,7 @@ fn no_limit_applies_when_the_flag_is_absent() {
         harness.respond_default(Response::ok().delay_ms(1500));
         let file = harness.write("hosts.toml", THREE);
 
-        let out = run(rshx(harness, &file, &["--", "sleep 1.5"]));
+        let out = run(rshx(harness, &file, &["run", "--", "sleep 1.5"]));
 
         assert_eq!(out.code, 0, "{}", out.stderr);
         assert!(out.stderr.contains("3 hosts: 3 ok"), "{}", out.stderr);
@@ -215,7 +235,11 @@ fn a_timed_out_child_is_terminated_rather_than_left_running() {
         harness.respond_default(Response::ok().delay_ms(30_000));
         let file = harness.write("hosts.toml", THREE);
 
-        let out = run(rshx(harness, &file, &["--timeout", "1s", "--", "sleep 30"]));
+        let out = run(rshx(
+            harness,
+            &file,
+            &["--timeout", "1s", "run", "--", "sleep 30"],
+        ));
 
         assert_eq!(out.code, 4, "{}", out.stderr);
         // The run returned only once the children were gone: `run` waits for
@@ -239,7 +263,11 @@ fn the_report_says_a_timed_out_remote_command_may_still_be_running() {
         harness.respond_default(Response::ok().delay_ms(30_000));
         let file = harness.write("hosts.toml", THREE);
 
-        let out = run(rshx(harness, &file, &["--timeout", "1s", "--", "sleep 30"]));
+        let out = run(rshx(
+            harness,
+            &file,
+            &["--timeout", "1s", "run", "--", "sleep 30"],
+        ));
 
         assert!(
             out.stderr.contains("stopped waiting"),
@@ -258,7 +286,7 @@ fn one_slow_host_does_not_delay_the_others() {
         let file = harness.write("hosts.toml", THREE);
 
         let started = Instant::now();
-        let out = run(rshx(harness, &file, &["--timeout", "2s", "--", "x"]));
+        let out = run(rshx(harness, &file, &["--timeout", "2s", "run", "--", "x"]));
         let elapsed = started.elapsed();
 
         assert_eq!(out.code, 4, "{}", out.stderr);
@@ -280,7 +308,11 @@ fn a_timeout_does_not_set_the_failed_bit() {
         harness.respond_default(Response::ok().delay_ms(30_000));
         let file = harness.write("hosts.toml", THREE);
 
-        let out = run(rshx(harness, &file, &["--timeout", "1s", "--", "sleep 30"]));
+        let out = run(rshx(
+            harness,
+            &file,
+            &["--timeout", "1s", "run", "--", "sleep 30"],
+        ));
 
         assert_ne!(out.code, 2, "a timeout is not a failure");
         assert_ne!(out.code, 99, "nor a cancellation: it is exit 4");
@@ -299,7 +331,7 @@ fn the_limit_applies_per_host_not_to_the_run() {
         let out = run(rshx(
             harness,
             &file,
-            &["--timeout", "1s", "--", "sleep 0.4"],
+            &["--timeout", "1s", "run", "--", "sleep 0.4"],
         ));
 
         assert_eq!(out.code, 0, "{}", out.stderr);
@@ -316,7 +348,7 @@ fn a_host_that_times_out_is_not_reported_as_cancelled() {
         let out = run(rshx(
             harness,
             &file,
-            &["--timeout", "1s", "--json", "--", "sleep 30"],
+            &["--timeout", "1s", "--json", "run", "--", "sleep 30"],
         ));
 
         assert!(

@@ -57,6 +57,10 @@ pub struct Response {
     /// When set, the fake ssh asks for a password the way `sudo -S` does: it
     /// prints rshx's `-p` prompt, reads a line, and fails unless it matches.
     password: Option<String>,
+    /// When set, the fake ssh keeps every byte it reads on stdin, so a test
+    /// can assert what rshx sent the Host. Never on with a password prompt:
+    /// that path reads stdin a line at a time.
+    capture_stdin: bool,
 }
 
 impl Response {
@@ -67,6 +71,7 @@ impl Response {
             code: 0,
             delay_ms: 0,
             password: None,
+            capture_stdin: false,
         }
     }
 
@@ -118,6 +123,13 @@ impl Response {
     /// with `-p`, so a run that set none prompts nothing and reads no stdin.
     pub fn prompt(mut self, password: &str) -> Response {
         self.password = Some(password.to_string());
+        self
+    }
+
+    /// Keeps every byte that arrives on stdin, so a test can assert what rshx
+    /// sent the Host. rshx sends a script this way.
+    pub fn captures_stdin(mut self) -> Response {
+        self.capture_stdin = true;
         self
     }
 }
@@ -183,6 +195,28 @@ impl Harness {
         self
     }
 
+    /// Scripts a destination whose answer changes with each invocation: the
+    /// first entry answers the first invocation, the second the second, and the
+    /// last answers every one after it. A command rshx sends twice — a script
+    /// copied to a Host, then run on it — is scripted this way.
+    pub fn respond_sequence(&self, dest: &str, responses: &[Response]) -> &Harness {
+        let base = self.dir.join("resp").join(dest);
+        for (index, response) in responses.iter().enumerate() {
+            self.script_response(
+                &base.join("seq").join((index + 1).to_string()),
+                response.clone(),
+            );
+        }
+        self
+    }
+
+    /// Every byte a Host's ssh read on stdin, for a response that asked to keep
+    /// them with `Response::captures_stdin`. Empty when nothing arrived, or
+    /// when no response for that destination asked.
+    pub fn raw_stdin(&self, dest: &str) -> Vec<u8> {
+        fs::read(self.dir.join("stdin_raw").join(dest)).unwrap_or_default()
+    }
+
     fn script_response(&self, dir: &Path, response: Response) {
         fs::create_dir_all(dir).unwrap();
         fs::write(dir.join("out"), &response.stdout).unwrap();
@@ -205,6 +239,14 @@ impl Harness {
             }
             None => {
                 let _ = fs::remove_file(dir.join("prompt"));
+            }
+        }
+        match response.capture_stdin {
+            true => {
+                fs::write(dir.join("capture_stdin"), b"1").unwrap();
+            }
+            false => {
+                let _ = fs::remove_file(dir.join("capture_stdin"));
             }
         }
     }
@@ -815,8 +857,30 @@ dest="${1:-}"
 resp="$dir/resp/$dest"
 [ -d "$resp" ] || resp="$dir/resp/default"
 
+# A destination may script one response per invocation, for the commands rshx
+# sends it twice: `resp/<dest>/seq/<n>` answers the n-th, and the last answers
+# every one after it. The count is a file per destination, written before the
+# response is read, so two invocations never share an answer.
+if [ -d "$resp/seq" ]; then
+    mkdir -p "$dir/count"
+    n=$(cat "$dir/count/$dest" 2>/dev/null) || n=0
+    n=$((n + 1))
+    printf '%s\n' "$n" > "$dir/count/$dest"
+    last=$(ls "$resp/seq" | sort -n | tail -n 1)
+    [ "$n" -le "$last" ] || n="$last"
+    resp="$resp/seq/$n"
+fi
+
 delay=$(cat "$resp/delay" 2>/dev/null) || delay=0
 code=$(cat "$resp/code" 2>/dev/null) || code=0
+
+# When the response asks for it, keep every byte that arrives on stdin: rshx
+# sends a script this way. The prompt below reads stdin a line at a time, so no
+# response asks for both.
+if [ -f "$resp/capture_stdin" ]; then
+    mkdir -p "$dir/stdin_raw"
+    cat > "$dir/stdin_raw/$dest"
+fi
 
 # When this invocation ran, and for which destination. One write per event, so
 # concurrent invocations never corrupt each other's records. The destination

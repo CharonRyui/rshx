@@ -45,7 +45,7 @@ ip = "10.0.0.1"
 
         let out = run({
             let mut cmd = harness.rshx();
-            cmd.args(["-H", file.to_str().unwrap(), "--", "hostname"]);
+            cmd.args(["-H", file.to_str().unwrap(), "run", "--", "hostname"]);
             cmd
         });
 
@@ -65,7 +65,7 @@ fn an_entry_with_only_a_name_adds_no_options() {
 
         run({
             let mut cmd = harness.rshx();
-            cmd.args(["-H", file.to_str().unwrap(), "--", "hostname"]);
+            cmd.args(["-H", file.to_str().unwrap(), "run", "--", "hostname"]);
             cmd
         });
 
@@ -92,7 +92,7 @@ fn the_destination_stays_the_name_even_when_overridden() {
 
         let out = run({
             let mut cmd = harness.rshx();
-            cmd.args(["-H", file.to_str().unwrap(), "--", "hostname"]);
+            cmd.args(["-H", file.to_str().unwrap(), "run", "--", "hostname"]);
             cmd
         });
 
@@ -121,7 +121,15 @@ fn a_pattern_carries_user_and_port_to_every_host_it_expands_to() {
 
         let out = run({
             let mut cmd = harness.rshx();
-            cmd.args(["-H", file.to_str().unwrap(), "-f", "1", "--", "hostname"]);
+            cmd.args([
+                "-H",
+                file.to_str().unwrap(),
+                "-f",
+                "1",
+                "run",
+                "--",
+                "hostname",
+            ]);
             cmd
         });
 
@@ -146,7 +154,7 @@ fn an_ip_on_a_pattern_is_rejected_with_a_reason() {
 
         let out = run({
             let mut cmd = harness.rshx();
-            cmd.args(["-H", file.to_str().unwrap(), "--", "hostname"]);
+            cmd.args(["-H", file.to_str().unwrap(), "run", "--", "hostname"]);
             cmd
         });
 
@@ -174,7 +182,7 @@ fn an_out_of_range_port_is_rejected() {
             );
             let out = run({
                 let mut cmd = harness.rshx();
-                cmd.args(["-H", file.to_str().unwrap(), "--", "hostname"]);
+                cmd.args(["-H", file.to_str().unwrap(), "run", "--", "hostname"]);
                 cmd
             });
             assert_eq!(
@@ -207,7 +215,7 @@ fn a_malformed_ip_is_rejected() {
             );
             let out = run({
                 let mut cmd = harness.rshx();
-                cmd.args(["-H", file.to_str().unwrap(), "--", "hostname"]);
+                cmd.args(["-H", file.to_str().unwrap(), "run", "--", "hostname"]);
                 cmd
             });
             assert_eq!(out.code, 1, "ip {ip} should be rejected: {}", out.stderr);
@@ -234,7 +242,7 @@ fn a_user_that_could_inject_ssh_options_is_rejected() {
             );
             let out = run({
                 let mut cmd = harness.rshx();
-                cmd.args(["-H", file.to_str().unwrap(), "--", "hostname"]);
+                cmd.args(["-H", file.to_str().unwrap(), "run", "--", "hostname"]);
                 cmd
             });
             assert_eq!(
@@ -266,7 +274,7 @@ fn the_override_does_not_change_the_reported_name() {
 
         let out = run({
             let mut cmd = harness.rshx();
-            cmd.args(["-H", file.to_str().unwrap(), "--", "hostname"]);
+            cmd.args(["-H", file.to_str().unwrap(), "run", "--", "hostname"]);
             cmd
         });
 
@@ -356,7 +364,7 @@ fn rshx_passes_the_options_ssh_needs_to_keep_reading_the_config() {
 
         let out = run({
             let mut cmd = harness.rshx();
-            cmd.args(["-H", file.to_str().unwrap(), "--", "hostname"]);
+            cmd.args(["-H", file.to_str().unwrap(), "run", "--", "hostname"]);
             cmd
         });
         assert_eq!(out.code, 0, "{}", out.stderr);

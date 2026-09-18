@@ -34,7 +34,7 @@ fn each_host_settles_into_one_json_object_with_no_enclosing_array() {
         harness.respond_default(Response::ok().stdout("node01\n"));
         let file = harness.write("hosts.toml", TWO);
 
-        let out = run(rshx(harness, &file, &["--", "hostname"]));
+        let out = run(rshx(harness, &file, &["run", "--", "hostname"]));
 
         assert_eq!(out.code, 0, "{}", out.stderr);
         assert!(!out.stdout.contains('['), "no array: {:?}", out.stdout);
@@ -49,7 +49,7 @@ fn an_object_carries_every_documented_field() {
         harness.respond_default(Response::ok().stdout("node01\n").stderr("a warning\n"));
         let file = harness.write("hosts.toml", ONE);
 
-        let out = run(rshx(harness, &file, &["--", "hostname"]));
+        let out = run(rshx(harness, &file, &["run", "--", "hostname"]));
         let object = &objects(&out.stdout)[0];
 
         assert_eq!(object["host"], "node01");
@@ -86,6 +86,7 @@ fn exit_code_is_absent_for_a_host_rshx_killed() {
                 "--timeout",
                 "1s",
                 "--json",
+                "run",
                 "--",
                 "sleep 30",
             ]);
@@ -115,7 +116,7 @@ fn a_cause_is_present_only_when_there_is_one() {
         harness.respond("node02", Response::failed(3).stderr("bash: nope\n"));
         let file = harness.write("hosts.toml", TWO);
 
-        let out = run(rshx(harness, &file, &["--", "x"]));
+        let out = run(rshx(harness, &file, &["run", "--", "x"]));
         let parsed = objects(&out.stdout);
         let by_host = |name: &str| {
             parsed
@@ -143,7 +144,7 @@ fn invalid_utf8_is_replaced_and_the_line_still_parses() {
         harness.respond_default(Response::ok().stdout_bytes(b"caf\xe9 \xff\xfe\n"));
         let file = harness.write("hosts.toml", ONE);
 
-        let out = run(rshx(harness, &file, &["--", "cat"]));
+        let out = run(rshx(harness, &file, &["run", "--", "cat"]));
 
         assert_eq!(out.code, 0, "the run does not fail: {}", out.stderr);
         let object = &objects(&out.stdout)[0];
@@ -165,7 +166,7 @@ fn a_stream_past_the_cap_is_cut_and_says_so() {
         harness.respond_default(Response::ok().stdout_bytes(&big));
         let file = harness.write("hosts.toml", ONE);
 
-        let out = run(rshx(harness, &file, &["--", "cat"]));
+        let out = run(rshx(harness, &file, &["run", "--", "cat"]));
 
         assert_eq!(out.code, 0, "{}", out.stderr);
         let object = &objects(&out.stdout)[0];
@@ -184,7 +185,7 @@ fn a_stream_under_the_cap_is_not_flagged() {
         harness.respond_default(Response::ok().stdout_bytes(&vec![b'x'; 1024 * 1024]));
         let file = harness.write("hosts.toml", ONE);
 
-        let out = run(rshx(harness, &file, &["--", "cat"]));
+        let out = run(rshx(harness, &file, &["run", "--", "cat"]));
 
         let object = &objects(&out.stdout)[0];
         assert_eq!(
@@ -202,7 +203,7 @@ fn stdout_carries_only_json_lines_while_the_summary_stays_on_stderr() {
         harness.respond("node02", Response::failed(1).stderr("boom\n"));
         let file = harness.write("hosts.toml", TWO);
 
-        let out = run(rshx(harness, &file, &["--", "x"]));
+        let out = run(rshx(harness, &file, &["run", "--", "x"]));
 
         assert_eq!(out.code, 2, "{}", out.stderr);
         for line in out.stdout.lines() {
@@ -226,7 +227,7 @@ fn json_is_never_coloured_even_when_asked_and_even_on_a_terminal() {
         let forced = run(rshx(
             harness,
             &file,
-            &["--color", "always", "--", "hostname"],
+            &["--color", "always", "run", "--", "hostname"],
         ));
         assert!(
             !forced.stdout.contains('\u{1b}'),
@@ -235,7 +236,11 @@ fn json_is_never_coloured_even_when_asked_and_even_on_a_terminal() {
         );
 
         let terminal = support::run_on_tty(
-            rshx(harness, &file, &["--color", "always", "--", "hostname"]),
+            rshx(
+                harness,
+                &file,
+                &["--color", "always", "run", "--", "hostname"],
+            ),
             support::Attach::BOTH,
         );
         let lines: Vec<&str> = terminal
@@ -261,10 +266,10 @@ fn json_and_the_plain_report_agree_on_status_and_exit_code() {
         );
         let file = harness.write("hosts.toml", "[[hosts]]\nname = \"node01\"\n\n[[hosts]]\nname = \"node02\"\n\n[[hosts]]\nname = \"node03\"\n");
 
-        let json = run(rshx(harness, &file, &["--", "x"]));
+        let json = run(rshx(harness, &file, &["run", "--", "x"]));
         let plain = run({
             let mut cmd = harness.rshx();
-            cmd.args(["-H", file.to_str().unwrap(), "-f", "1", "--", "x"]);
+            cmd.args(["-H", file.to_str().unwrap(), "-f", "1", "run", "--", "x"]);
             cmd
         });
 
@@ -316,7 +321,16 @@ fn a_line_oriented_consumer_sees_results_as_they_settle() {
         // Two at once, so the fast Host's result is not waiting on the slow
         // Host for a slot.
         let mut cmd = harness.rshx();
-        cmd.args(["-H", file.to_str().unwrap(), "-f", "2", "--json", "--", "x"]);
+        cmd.args([
+            "-H",
+            file.to_str().unwrap(),
+            "-f",
+            "2",
+            "--json",
+            "run",
+            "--",
+            "x",
+        ]);
         cmd.stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null());
         let mut child = spawn(&mut cmd);
@@ -345,7 +359,7 @@ fn a_host_that_produces_nothing_still_gets_an_object() {
         harness.respond_default(Response::ok());
         let file = harness.write("hosts.toml", ONE);
 
-        let out = run(rshx(harness, &file, &["--", "true"]));
+        let out = run(rshx(harness, &file, &["run", "--", "true"]));
 
         let object = &objects(&out.stdout)[0];
         assert_eq!(object["stdout"], "");
@@ -360,7 +374,7 @@ fn newlines_inside_a_stream_do_not_break_the_one_line_per_host_rule() {
         harness.respond_default(Response::ok().stdout("a\nb\nc\n").stderr("x\ny\n"));
         let file = harness.write("hosts.toml", TWO);
 
-        let out = run(rshx(harness, &file, &["--", "cat"]));
+        let out = run(rshx(harness, &file, &["run", "--", "cat"]));
 
         assert_eq!(
             out.stdout_lines().len(),

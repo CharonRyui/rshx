@@ -44,7 +44,7 @@ fn a_quiet_host_prints_one_line_and_none_of_its_stdout() {
         harness.respond_default(Response::ok().stdout("42G /data\n"));
         let file = harness.write("hosts.toml", ONE);
 
-        let out = run(rshx(harness, &file, &["-q", "--", "du -hs /data"]));
+        let out = run(rshx(harness, &file, &["-q", "run", "--", "du -hs /data"]));
 
         assert_eq!(out.code, 0, "{}", out.stderr);
         assert_eq!(out.stdout_lines().len(), 1, "{:?}", out.stdout);
@@ -63,7 +63,7 @@ fn a_one_line_stream_folds_onto_the_status_line() {
         harness.respond_default(Response::ok().stdout("42G /data\n"));
         let file = harness.write("hosts.toml", TWO);
 
-        let out = run(rshx(harness, &file, &["--", "du -hs /data"]));
+        let out = run(rshx(harness, &file, &["run", "--", "du -hs /data"]));
 
         assert_eq!(out.code, 0, "{}", out.stderr);
         let lines = out.stdout_lines();
@@ -83,7 +83,7 @@ fn a_multi_line_stream_becomes_an_indented_block() {
         harness.respond_default(Response::ok().stdout("first\nsecond\nthird\n"));
         let file = harness.write("hosts.toml", ONE);
 
-        let out = run(rshx(harness, &file, &["--", "printf"]));
+        let out = run(rshx(harness, &file, &["run", "--", "printf"]));
 
         assert_eq!(out.code, 0, "{}", out.stderr);
         let lines = out.stdout_lines();
@@ -103,7 +103,7 @@ fn a_trailing_newline_does_not_make_a_block_of_one_line() {
         harness.respond_default(Response::ok().stdout("single\n"));
         let file = harness.write("hosts.toml", ONE);
 
-        let out = run(rshx(harness, &file, &["--", "hostname"]));
+        let out = run(rshx(harness, &file, &["run", "--", "hostname"]));
         assert_eq!(out.stdout_lines().len(), 1, "{:?}", out.stdout);
     });
 }
@@ -117,7 +117,7 @@ fn a_host_that_is_not_ok_always_shows_its_stderr() {
         );
         let file = harness.write("hosts.toml", ONE);
 
-        let out = run(rshx(harness, &file, &["--", "nope"]));
+        let out = run(rshx(harness, &file, &["run", "--", "nope"]));
 
         assert_eq!(out.code, 2);
         assert!(
@@ -138,7 +138,7 @@ fn an_unreachable_host_shows_its_stderr_too() {
         );
         let file = harness.write("hosts.toml", ONE);
 
-        let out = run(rshx(harness, &file, &["--", "hostname"]));
+        let out = run(rshx(harness, &file, &["run", "--", "hostname"]));
 
         assert_eq!(out.code, 4, "{}", out.stderr);
         assert!(
@@ -163,7 +163,7 @@ fn a_multi_line_stderr_becomes_an_indented_block() {
         );
         let file = harness.write("hosts.toml", ONE);
 
-        let out = run(rshx(harness, &file, &["--", "x"]));
+        let out = run(rshx(harness, &file, &["run", "--", "x"]));
 
         assert_eq!(out.code, 2, "{}", out.stderr);
         let lines: Vec<&str> = out.stdout.lines().collect();
@@ -186,14 +186,14 @@ fn stderr_flag_shows_an_ok_hosts_stderr() {
         harness.respond_default(Response::ok().stderr("a warning\n"));
         let file = harness.write("hosts.toml", ONE);
 
-        let silent = run(rshx(harness, &file, &["--", "hostname"]));
+        let silent = run(rshx(harness, &file, &["run", "--", "hostname"]));
         assert!(
             !silent.stdout.contains("a warning"),
             "an ok Host's stderr is hidden by default: {:?}",
             silent.stdout
         );
 
-        let loud = run(rshx(harness, &file, &["--stderr", "--", "hostname"]));
+        let loud = run(rshx(harness, &file, &["--stderr", "run", "--", "hostname"]));
         assert!(
             loud.stdout.contains("  a warning"),
             "--stderr shows it: {:?}",
@@ -216,7 +216,7 @@ fn the_cause_appears_for_failures_and_never_changes_the_outcome() {
         );
         let file = harness.write("hosts.toml", TWO);
 
-        let out = run(rshx(harness, &file, &["--", "hostname"]));
+        let out = run(rshx(harness, &file, &["run", "--", "hostname"]));
 
         assert!(
             out.stdout.contains("(connect)"),
@@ -242,7 +242,7 @@ fn a_failure_with_no_recognisable_text_gets_no_cause() {
         );
         let file = harness.write("hosts.toml", ONE);
 
-        let out = run(rshx(harness, &file, &["--", "x"]));
+        let out = run(rshx(harness, &file, &["run", "--", "x"]));
 
         assert_eq!(out.code, 2, "still failed: {}", out.stderr);
         assert!(
@@ -263,7 +263,7 @@ fn a_dns_failure_gets_the_dns_cause() {
         );
         let file = harness.write("hosts.toml", ONE);
 
-        let out = run(rshx(harness, &file, &["--", "hostname"]));
+        let out = run(rshx(harness, &file, &["run", "--", "hostname"]));
 
         assert_eq!(out.code, 4, "{}", out.stderr);
         assert!(
@@ -292,7 +292,7 @@ fn the_cause_comes_from_stderr_not_stdout() {
         );
         let file = harness.write("hosts.toml", ONE);
 
-        let out = run(rshx(harness, &file, &["--", "x"]));
+        let out = run(rshx(harness, &file, &["run", "--", "x"]));
 
         assert_eq!(out.code, 2, "{}", out.stderr);
         assert!(
@@ -314,7 +314,7 @@ fn a_terminal_gets_colour_and_a_pipe_does_not() {
         harness.respond_default(Response::ok());
         let file = harness.write("hosts.toml", ONE);
 
-        let piped = run(rshx(harness, &file, &["--", "hostname"]));
+        let piped = run(rshx(harness, &file, &["run", "--", "hostname"]));
         assert!(
             !piped.stdout.contains('\u{1b}'),
             "a pipe gets no colour: {:?}",
@@ -322,7 +322,7 @@ fn a_terminal_gets_colour_and_a_pipe_does_not() {
         );
 
         let terminal = run_on_tty(
-            on_terminal(harness, &file, &["--", "hostname"]),
+            on_terminal(harness, &file, &["run", "--", "hostname"]),
             Attach::STDOUT_ONLY,
         );
         assert!(
@@ -340,14 +340,14 @@ fn no_color_is_honoured_on_a_terminal() {
         let file = harness.write("hosts.toml", ONE);
 
         let plain = run_on_tty(
-            on_terminal(harness, &file, &["--", "hostname"]),
+            on_terminal(harness, &file, &["run", "--", "hostname"]),
             Attach::STDOUT_ONLY,
         );
         assert!(plain.stdout.contains('\u{1b}'), "{:?}", plain.stdout);
 
         let out = run_on_tty(
             {
-                let mut cmd = on_terminal(harness, &file, &["--", "hostname"]);
+                let mut cmd = on_terminal(harness, &file, &["run", "--", "hostname"]);
                 cmd.env("NO_COLOR", "1");
                 cmd
             },
@@ -368,7 +368,11 @@ fn color_never_removes_colour_on_a_terminal() {
         let file = harness.write("hosts.toml", ONE);
 
         let out = run_on_tty(
-            on_terminal(harness, &file, &["--color", "never", "--", "hostname"]),
+            on_terminal(
+                harness,
+                &file,
+                &["--color", "never", "run", "--", "hostname"],
+            ),
             Attach::STDOUT_ONLY,
         );
 
@@ -385,7 +389,11 @@ fn an_explicit_color_always_beats_no_color() {
 
         // NO_COLOR is a default, not an override of an explicit request.
         let out = run({
-            let mut cmd = rshx(harness, &file, &["--color", "always", "--", "hostname"]);
+            let mut cmd = rshx(
+                harness,
+                &file,
+                &["--color", "always", "run", "--", "hostname"],
+            );
             cmd.env("NO_COLOR", "1");
             cmd
         });
@@ -407,7 +415,7 @@ fn stdout_chrome_is_coloured_on_a_terminal() {
         // stdout alone on the terminal, so the escape sequences cannot have
         // come from the stderr summary or from the heartbeat.
         let out = run_on_tty(
-            on_terminal(harness, &file, &["--", "hostname"]),
+            on_terminal(harness, &file, &["run", "--", "hostname"]),
             Attach::STDOUT_ONLY,
         );
 
@@ -434,7 +442,7 @@ fn stdout_and_stderr_are_judged_separately() {
         // stdout is a pipe and stderr is a terminal: the terminal stream is
         // still coloured, which one global answer could not produce.
         let out = run_on_tty(
-            on_terminal(harness, &file, &["--", "hostname"]),
+            on_terminal(harness, &file, &["run", "--", "hostname"]),
             Attach::STDERR_ONLY,
         );
 
@@ -456,7 +464,11 @@ fn stdout_and_stderr_are_judged_separately() {
 fn an_unknown_color_value_is_a_usage_error() {
     with_harness(|harness| {
         let file = harness.write("hosts.toml", ONE);
-        let out = run(rshx(harness, &file, &["--color", "sometimes", "--", "x"]));
+        let out = run(rshx(
+            harness,
+            &file,
+            &["--color", "sometimes", "run", "--", "x"],
+        ));
         assert_eq!(out.code, 5, "{}", out.stderr);
     });
 }
@@ -467,7 +479,7 @@ fn an_empty_stream_does_not_add_a_block() {
         harness.respond_default(Response::ok());
         let file = harness.write("hosts.toml", ONE);
 
-        let out = run(rshx(harness, &file, &["--stderr", "--", "true"]));
+        let out = run(rshx(harness, &file, &["--stderr", "run", "--", "true"]));
 
         assert_eq!(
             out.stdout_lines().len(),
@@ -485,7 +497,7 @@ fn the_heading_names_the_command_and_only_appears_on_a_terminal() {
         let file = harness.write("hosts.toml", TWO);
 
         let terminal = run_on_tty(
-            on_terminal(harness, &file, &["--", "du -hs /data"]),
+            on_terminal(harness, &file, &["run", "--", "du -hs /data"]),
             Attach::STDERR_ONLY,
         );
         assert!(
@@ -501,7 +513,7 @@ fn the_heading_names_the_command_and_only_appears_on_a_terminal() {
 
         // Chrome, not report: a redirected stderr is a file nobody is watching,
         // and stdout must stay one line per Host either way.
-        let piped = run(rshx(harness, &file, &["--", "du -hs /data"]));
+        let piped = run(rshx(harness, &file, &["run", "--", "du -hs /data"]));
         assert!(
             !piped.stdout.contains("du -hs /data") && !piped.stderr.contains("du -hs /data"),
             "a redirected run gets no heading: {:?} / {:?}",
@@ -519,7 +531,7 @@ fn a_mixed_run_aligns_the_columns_under_the_longest_status() {
         harness.respond("node03", Response::unreachable());
         let file = harness.write("hosts.toml", THREE);
 
-        let out = run(rshx(harness, &file, &["--", "true"]));
+        let out = run(rshx(harness, &file, &["run", "--", "true"]));
         // A mixed run is a failure, by design: 2 for `failed` | 4 for
         // `unreachable`.
         assert_eq!(out.code, 6, "{}", out.stderr);

@@ -27,7 +27,15 @@ fn prints_one_line_per_host() {
         // covers.
         let out = run({
             let mut cmd = harness.rshx();
-            cmd.args(["-H", file.to_str().unwrap(), "-f", "1", "--", "hostname"]);
+            cmd.args([
+                "-H",
+                file.to_str().unwrap(),
+                "-f",
+                "1",
+                "run",
+                "--",
+                "hostname",
+            ]);
             cmd
         });
 
@@ -57,6 +65,7 @@ fn forwards_the_command_verbatim_including_hyphen_arguments() {
             cmd.args([
                 "-H",
                 file.to_str().unwrap(),
+                "run",
                 "--",
                 "uptime",
                 "-p",
@@ -100,7 +109,7 @@ fn rejects_names_that_are_not_on_the_whitelist() {
             let file = harness.write("bad.toml", &format!("[[hosts]]\nname = {name:?}\n"));
             let out = run({
                 let mut cmd = harness.rshx();
-                cmd.args(["-H", file.to_str().unwrap(), "--", "hostname"]);
+                cmd.args(["-H", file.to_str().unwrap(), "run", "--", "hostname"]);
                 cmd
             });
             assert_eq!(out.code, 1, "{name:?} should be rejected: {}", out.stderr);
@@ -126,7 +135,7 @@ fn rejects_two_entries_declaring_the_same_name() {
         );
         let out = run({
             let mut cmd = harness.rshx();
-            cmd.args(["-H", file.to_str().unwrap(), "--", "hostname"]);
+            cmd.args(["-H", file.to_str().unwrap(), "run", "--", "hostname"]);
             cmd
         });
 
@@ -144,7 +153,7 @@ fn a_missing_host_file_is_a_local_error() {
     with_harness(|harness| {
         let out = run({
             let mut cmd = harness.rshx();
-            cmd.args(["-H", "nope.toml", "--", "hostname"]);
+            cmd.args(["-H", "nope.toml", "run", "--", "hostname"]);
             cmd
         });
         assert_eq!(out.code, 1, "{}", out.stderr);
@@ -158,7 +167,7 @@ fn a_toml_syntax_error_keeps_the_parser_line_and_column() {
         let file = harness.write("broken.toml", "[[hosts]\nname = \"node01\"\n");
         let out = run({
             let mut cmd = harness.rshx();
-            cmd.args(["-H", file.to_str().unwrap(), "--", "hostname"]);
+            cmd.args(["-H", file.to_str().unwrap(), "run", "--", "hostname"]);
             cmd
         });
 
@@ -211,7 +220,7 @@ fn exit_codes_follow_the_bit_flag_scheme() {
 
         let both = run({
             let mut cmd = harness.rshx();
-            cmd.args(["-H", file.to_str().unwrap(), "--", "hostname"]);
+            cmd.args(["-H", file.to_str().unwrap(), "run", "--", "hostname"]);
             cmd
         });
         assert_eq!(
@@ -239,7 +248,7 @@ fn exit_codes_follow_the_bit_flag_scheme() {
         harness.respond("node03", Response::ok());
         let ok = run({
             let mut cmd = harness.rshx();
-            cmd.args(["-H", file.to_str().unwrap(), "--", "hostname"]);
+            cmd.args(["-H", file.to_str().unwrap(), "run", "--", "hostname"]);
             cmd
         });
         assert_eq!(ok.code, 0, "{}", ok.stderr);
@@ -252,7 +261,7 @@ fn exit_codes_follow_the_bit_flag_scheme() {
         harness.respond("node02", Response::failed(1));
         let failed = run({
             let mut cmd = harness.rshx();
-            cmd.args(["-H", file.to_str().unwrap(), "--", "hostname"]);
+            cmd.args(["-H", file.to_str().unwrap(), "run", "--", "hostname"]);
             cmd
         });
         assert_eq!(failed.code, 2, "{}", failed.stderr);
@@ -266,7 +275,7 @@ fn exit_codes_follow_the_bit_flag_scheme() {
         harness.respond("node03", Response::unreachable());
         let unreachable = run({
             let mut cmd = harness.rshx();
-            cmd.args(["-H", file.to_str().unwrap(), "--", "hostname"]);
+            cmd.args(["-H", file.to_str().unwrap(), "run", "--", "hostname"]);
             cmd
         });
         assert_eq!(unreachable.code, 4, "{}", unreachable.stderr);
@@ -293,7 +302,7 @@ fn status_never_comes_from_output_text() {
 
         let out = run({
             let mut cmd = harness.rshx();
-            cmd.args(["-H", file.to_str().unwrap(), "--", "hostname"]);
+            cmd.args(["-H", file.to_str().unwrap(), "run", "--", "hostname"]);
             cmd
         });
 
@@ -319,7 +328,7 @@ fn the_host_file_is_found_by_default() {
         harness.write("rshx.toml", THREE);
         let local = run({
             let mut cmd = harness.rshx();
-            cmd.args(["--", "hostname"]);
+            cmd.args(["run", "--", "hostname"]);
             cmd
         });
         assert_eq!(local.code, 0, "{}", local.stderr);
@@ -329,7 +338,7 @@ fn the_host_file_is_found_by_default() {
         harness.write("xdg/rshx/hosts.toml", "[[hosts]]\nname = \"elsewhere\"\n");
         let still_local = run({
             let mut cmd = harness.rshx();
-            cmd.args(["--", "hostname"]);
+            cmd.args(["run", "--", "hostname"]);
             cmd
         });
         assert!(
@@ -342,7 +351,7 @@ fn the_host_file_is_found_by_default() {
         std::fs::remove_file(harness.path().join("rshx.toml")).unwrap();
         let xdg = run({
             let mut cmd = harness.rshx();
-            cmd.args(["--", "hostname"]);
+            cmd.args(["run", "--", "hostname"]);
             cmd
         });
         assert_eq!(xdg.code, 0, "{}", xdg.stderr);
@@ -364,7 +373,7 @@ fn the_summary_agrees_with_the_exit_code() {
 
         let out = run({
             let mut cmd = harness.rshx();
-            cmd.args(["-H", file.to_str().unwrap(), "--", "hostname"]);
+            cmd.args(["-H", file.to_str().unwrap(), "run", "--", "hostname"]);
             cmd
         });
 
@@ -393,7 +402,7 @@ fn a_failed_host_shows_its_stderr() {
 
         let out = run({
             let mut cmd = harness.rshx();
-            cmd.args(["-H", file.to_str().unwrap(), "--", "nope"]);
+            cmd.args(["-H", file.to_str().unwrap(), "run", "--", "nope"]);
             cmd
         });
 
