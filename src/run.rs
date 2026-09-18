@@ -12,7 +12,7 @@ use tokio::process::Command;
 use tokio::sync::mpsc;
 
 use crate::cause::Cause;
-use crate::cli::Cli;
+use crate::cli::{Cli, CliCommand};
 use crate::heartbeat::{self, Heartbeat};
 use crate::host::{self, Host};
 use crate::interrupt::{self, Interrupt};
@@ -85,26 +85,52 @@ pub struct Outcome {
 
 /// Runs the command on every selected Host and reports as they settle.
 pub async fn execute(cli: &Cli) -> Result<u8> {
-    let path = host::resolve_path(cli.host_file.as_deref())?;
+    let options = &cli.options;
+    let path = host::resolve_path(options.host_file.as_deref())?;
     let file = host::load(&path)?;
-    let selected = file.select(&cli.groups)?;
+    let selected = file.select(&options.groups)?;
     let total = selected.len();
     let started = Instant::now();
 
+    // Chrome goes on stderr, and only when a terminal is watching it: a
+    // redirected stderr must stay free of it, and `--json` must be parseable.
+    let chrome = !options.json && std::io::IsTerminal::is_terminal(&std::io::stderr());
+
+    let mut reporter = report::Reporter::new(
+        options.color,
+        report::Detail {
+            stdout: !options.quiet,
+            stderr: options.stderr,
+        },
+        if options.json {
+            report::Format::Json
+        } else {
+            report::Format::Plain
+        },
+        chrome,
+    );
+
     // `--privilege` wraps the command once, before anything runs, so every Host
     // gets that same command: a remote sudo reads its password from stdin.
-    let command = if cli.privilege {
-        privilege::under_sudo(&cli.command)
-    } else {
-        cli.command.clone()
+    let command = match &cli.sub_command {
+        CliCommand::Run(args) => {
+            if options.privilege {
+                // Before the heading, so what rshx says about the command is read first.
+                if privilege::runs_sudo(&args.command) {
+                    reporter.warning("the command runs sudo itself; --privilege puts its own sudo in front of it");
+                }
+                // A command that runs sudo itself gets rshx's sudo in front of it and
+                // elevates a second time: rshx reads none of the command's own options —
+                // that would mean knowing sudo's grammar — so it warns rather than guesses.
+                privilege::under_sudo(&args.command)
+            } else {
+                args.command.clone()
+            }
+        }
     };
-    // A command that runs sudo itself gets rshx's sudo in front of it and
-    // elevates a second time: rshx reads none of the command's own options —
-    // that would mean knowing sudo's grammar — so it warns rather than guesses.
-    let nested_sudo = cli.privilege && privilege::runs_sudo(&cli.command);
     // Borrowed from here on: every Host's task reads the same command.
     let command = &command;
-    let prompts = if cli.privilege {
+    let prompts = if options.privilege {
         let privilege = Arc::new(Privilege::default());
         let (requests, asks) = mpsc::unbounded_channel();
         (
@@ -120,30 +146,8 @@ pub async fn execute(cli: &Cli) -> Result<u8> {
     };
     let (prompts, mut asks) = prompts;
 
-    // Chrome goes on stderr, and only when a terminal is watching it: a
-    // redirected stderr must stay free of it, and `--json` must be parseable.
-    let chrome = !cli.json && std::io::IsTerminal::is_terminal(&std::io::stderr());
-
-    let mut reporter = report::Reporter::new(
-        cli.color,
-        report::Detail {
-            stdout: !cli.quiet,
-            stderr: cli.stderr,
-        },
-        if cli.json {
-            report::Format::Json
-        } else {
-            report::Format::Plain
-        },
-        chrome,
-    );
-    // Before the heading, so what rshx says about the command is read first.
-    if nested_sudo {
-        reporter
-            .warning("the command runs sudo itself; --privilege puts its own sudo in front of it");
-    }
     // Before the heartbeat's first draw, so the heading is not written over.
-    reporter.heading(command, total, cli.fanout);
+    reporter.heading(command, total, options.fanout);
     let heartbeat = Rc::new(Heartbeat::new(total, chrome));
     let interrupt = Interrupt::install();
 
@@ -161,10 +165,10 @@ pub async fn execute(cli: &Cli) -> Result<u8> {
                     return None;
                 }
                 heartbeat.start(&host.name);
-                Some(run_host(host, command, cli.timeout, prompts, &interrupt).await)
+                Some(run_host(host, command, options.timeout, prompts, &interrupt).await)
             }
         })
-        .buffer_unordered(cli.fanout as usize);
+        .buffer_unordered(options.fanout as usize);
 
     let mut ticker = tokio::time::interval(heartbeat::TICK);
     // A missed tick means the run was busy, not that it owes several redraws.

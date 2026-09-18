@@ -1,11 +1,16 @@
 use std::path::PathBuf;
 
-use clap::Parser;
+use clap::{Args, Parser, Subcommand};
 
-/// Run one command on many hosts over ssh.
-#[derive(Debug, Parser)]
-#[command(name = "rshx", version, about, max_term_width = 100)]
-pub struct Cli {
+/// Operations to execute on hosts
+#[derive(Debug, Subcommand)]
+pub enum CliCommand {
+    /// Run command or script on hosts
+    Run(CliRunArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct CliOptions {
     /// The host file listing the hosts to run on.
     #[arg(short = 'H', long, value_name = "FILE")]
     pub host_file: Option<PathBuf>,
@@ -54,6 +59,13 @@ pub struct Cli {
     /// When to colour the report.
     #[arg(long, value_enum, default_value_t = crate::report::ColorWhen::Auto)]
     pub color: crate::report::ColorWhen,
+}
+
+#[derive(Debug, Args)]
+pub struct CliRunArgs {
+    /// Script file to run
+    #[arg(long, value_name = "SCRIPT_PATH")]
+    script: Option<PathBuf>,
 
     /// The command to run on every host, after `--`.
     #[arg(
@@ -64,4 +76,17 @@ pub struct Cli {
         allow_hyphen_values = true
     )]
     pub command: Vec<String>,
+}
+
+/// Run operations on many hosts over ssh.
+#[derive(Debug, Parser)]
+#[command(name = "rshx", version, about, max_term_width = 100)]
+pub struct Cli {
+    /// Cli general options
+    #[command(flatten)]
+    pub options: CliOptions,
+
+    /// subcommand for operation
+    #[command(subcommand)]
+    pub sub_command: CliCommand,
 }
