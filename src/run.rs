@@ -12,7 +12,7 @@ use tokio::process::Command;
 use tokio::sync::mpsc;
 
 use crate::cause::Cause;
-use crate::cli::{Cli, CliCommand};
+use crate::cli::{Cli, CliCommand, CliOptions};
 use crate::heartbeat::{self, Heartbeat};
 use crate::host::{self, Host};
 use crate::interrupt::{self, Interrupt};
@@ -83,6 +83,29 @@ pub struct Outcome {
     pub duration: Duration,
 }
 
+fn generate_command(options: &CliOptions, subcommand: &CliCommand) -> Result<Vec<String>> {
+    let command = match &subcommand {
+        CliCommand::Run(args) => {
+            if !args.command.is_empty() {
+                if options.privilege {
+                    // A command that runs sudo itself gets rshx's sudo in front of it and
+                    // elevates a second time: rshx reads none of the command's own options —
+                    // that would mean knowing sudo's grammar — so it warns rather than guesses.
+                    privilege::under_sudo(&args.command)
+                } else {
+                    args.command.clone()
+                }
+            } else {
+                unreachable!()
+            }
+        }
+        CliCommand::Ping => {
+            vec!["echo".to_string(), "pong".to_string()]
+        }
+    };
+    Ok(command)
+}
+
 /// Runs the command on every selected Host and reports as they settle.
 pub async fn execute(cli: &Cli) -> Result<u8> {
     let options = &cli.options;
@@ -95,6 +118,8 @@ pub async fn execute(cli: &Cli) -> Result<u8> {
     // Chrome goes on stderr, and only when a terminal is watching it: a
     // redirected stderr must stay free of it, and `--json` must be parseable.
     let chrome = !options.json && std::io::IsTerminal::is_terminal(&std::io::stderr());
+
+    let command = generate_command(options, &cli.sub_command)?;
 
     let mut reporter = report::Reporter::new(
         options.color,
@@ -112,22 +137,12 @@ pub async fn execute(cli: &Cli) -> Result<u8> {
 
     // `--privilege` wraps the command once, before anything runs, so every Host
     // gets that same command: a remote sudo reads its password from stdin.
-    let command = match &cli.sub_command {
-        CliCommand::Run(args) => {
-            if options.privilege {
-                // Before the heading, so what rshx says about the command is read first.
-                if privilege::runs_sudo(&args.command) {
-                    reporter.warning("the command runs sudo itself; --privilege puts its own sudo in front of it");
-                }
-                // A command that runs sudo itself gets rshx's sudo in front of it and
-                // elevates a second time: rshx reads none of the command's own options —
-                // that would mean knowing sudo's grammar — so it warns rather than guesses.
-                privilege::under_sudo(&args.command)
-            } else {
-                args.command.clone()
-            }
-        }
-    };
+    // Before the heading, so what rshx says about the command is read first.
+    if options.privilege && privilege::runs_sudo(&command) {
+        reporter
+            .warning("the command runs sudo itself; --privilege puts its own sudo in front of it");
+    }
+
     // Borrowed from here on: every Host's task reads the same command.
     let command = &command;
     let prompts = if options.privilege {

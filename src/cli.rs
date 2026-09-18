@@ -7,6 +7,9 @@ use clap::{Args, Parser, Subcommand};
 pub enum CliCommand {
     /// Run command or script on hosts
     Run(CliRunArgs),
+
+    /// Check all hosts are available
+    Ping,
 }
 
 #[derive(Debug, Args)]
@@ -62,15 +65,15 @@ pub struct CliOptions {
 }
 
 #[derive(Debug, Args)]
+#[group(required = true, multiple = false)]
 pub struct CliRunArgs {
     /// Script file to run
     #[arg(long, value_name = "SCRIPT_PATH")]
-    script: Option<PathBuf>,
+    pub script: Option<PathBuf>,
 
     /// The command to run on every host, after `--`.
     #[arg(
         last = true,
-        required = true,
         num_args = 1..,
         value_name = "COMMAND",
         allow_hyphen_values = true
