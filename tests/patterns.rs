@@ -13,7 +13,15 @@ fn expand(name: &str) -> Result<Vec<String>, (i32, String)> {
 
     let out = run({
         let mut cmd = harness.rshx();
-        cmd.args(["-H", file.to_str().unwrap(), "-f", "1", "--", "hostname"]);
+        cmd.args([
+            "-H",
+            file.to_str().unwrap(),
+            "-f",
+            "1",
+            "run",
+            "--",
+            "hostname",
+        ]);
         cmd
     });
 
@@ -151,7 +159,7 @@ fn a_pattern_and_a_literal_may_not_claim_the_same_host() {
 
         let out = run({
             let mut cmd = harness.rshx();
-            cmd.args(["-H", file.to_str().unwrap(), "--", "hostname"]);
+            cmd.args(["-H", file.to_str().unwrap(), "run", "--", "hostname"]);
             cmd
         });
 
@@ -184,7 +192,7 @@ fn two_patterns_may_not_overlap() {
 
         let out = run({
             let mut cmd = harness.rshx();
-            cmd.args(["-H", file.to_str().unwrap(), "--", "hostname"]);
+            cmd.args(["-H", file.to_str().unwrap(), "run", "--", "hostname"]);
             cmd
         });
 
@@ -201,7 +209,15 @@ fn expanded_hosts_are_reported_by_their_expanded_names() {
 
         let out = run({
             let mut cmd = harness.rshx();
-            cmd.args(["-H", file.to_str().unwrap(), "-f", "1", "--", "hostname"]);
+            cmd.args([
+                "-H",
+                file.to_str().unwrap(),
+                "-f",
+                "1",
+                "run",
+                "--",
+                "hostname",
+            ]);
             cmd
         });
 

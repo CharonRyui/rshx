@@ -1,24 +1,27 @@
 //! Running the command on Hosts, and deciding what the run's outcome means.
-
-use std::process::Stdio;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use futures_util::stream::{self, StreamExt};
+use futures_util::{StreamExt, stream};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
-use tokio::sync::mpsc;
+use tokio::sync::mpsc::{self, UnboundedReceiver};
 
 use crate::cause::Cause;
 use crate::cli::{Cli, CliCommand, CliOptions};
 use crate::heartbeat::{self, Heartbeat};
 use crate::host::{self, Host};
 use crate::interrupt::{self, Interrupt};
-use crate::privilege::{self, Privilege, PromptClock};
-use crate::report;
+use crate::privilege::{self, Privilege, PromptClock, Request};
+use crate::report::{self, Reporter};
+use crate::run::command::execute_command;
+use crate::run::script::execute_local_script;
 use crate::{EXIT_FAILED, EXIT_INTERRUPTED, EXIT_LOCAL, EXIT_OK, EXIT_UNREACHABLE};
+
+mod command;
+mod script;
 
 /// The terminal outcome of one Host's command.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -83,27 +86,23 @@ pub struct Outcome {
     pub duration: Duration,
 }
 
-fn generate_command(options: &CliOptions, subcommand: &CliCommand) -> Result<Vec<String>> {
-    let command = match &subcommand {
-        CliCommand::Run(args) => {
-            if !args.command.is_empty() {
-                if options.privilege {
-                    // A command that runs sudo itself gets rshx's sudo in front of it and
-                    // elevates a second time: rshx reads none of the command's own options —
-                    // that would mean knowing sudo's grammar — so it warns rather than guesses.
-                    privilege::under_sudo(&args.command)
-                } else {
-                    args.command.clone()
-                }
-            } else {
-                unreachable!()
-            }
+impl Outcome {
+    /// A Host rshx itself could not get as far as running anything on, with no
+    /// exit status to report: its own ssh never said anything about a command.
+    /// The message is rshx's, so it is prefixed as such.
+    pub fn local_failure(host: &str, duration: Duration, message: String) -> Outcome {
+        Outcome {
+            host: host.to_string(),
+            status: Status::Unreachable,
+            exit_code: None,
+            cause: None,
+            stdout: Vec::new(),
+            stderr: format!("rshx: {message}\n").into_bytes(),
+            stdout_truncated: false,
+            stderr_truncated: false,
+            duration,
         }
-        CliCommand::Ping => {
-            vec!["echo".to_string(), "pong".to_string()]
-        }
-    };
-    Ok(command)
+    }
 }
 
 /// Runs the command on every selected Host and reports as they settle.
@@ -112,14 +111,10 @@ pub async fn execute(cli: &Cli) -> Result<u8> {
     let path = host::resolve_path(options.host_file.as_deref())?;
     let file = host::load(&path)?;
     let selected = file.select(&options.groups)?;
-    let total = selected.len();
-    let started = Instant::now();
 
     // Chrome goes on stderr, and only when a terminal is watching it: a
     // redirected stderr must stay free of it, and `--json` must be parseable.
     let chrome = !options.json && std::io::IsTerminal::is_terminal(&std::io::stderr());
-
-    let command = generate_command(options, &cli.sub_command)?;
 
     let mut reporter = report::Reporter::new(
         options.color,
@@ -135,128 +130,28 @@ pub async fn execute(cli: &Cli) -> Result<u8> {
         chrome,
     );
 
+    if let CliCommand::Run(args) = &cli.sub_command
+        && let Some(script_path) = &args.script
+    {
+        return execute_local_script(&selected, script_path, options, &mut reporter).await;
+    }
+
+    let command = command::generate_command(options, &cli.sub_command)?;
+
     // `--privilege` wraps the command once, before anything runs, so every Host
     // gets that same command: a remote sudo reads its password from stdin.
     // Before the heading, so what rshx says about the command is read first.
-    if options.privilege && privilege::runs_sudo(&command) {
+    // Asked of the command as it was typed: `command` is already wrapped, and
+    // its own leading `sudo` is rshx's.
+    if let CliCommand::Run(args) = &cli.sub_command
+        && options.privilege
+        && privilege::runs_sudo(&args.command)
+    {
         reporter
             .warning("the command runs sudo itself; --privilege puts its own sudo in front of it");
     }
 
-    // Borrowed from here on: every Host's task reads the same command.
-    let command = &command;
-    let prompts = if options.privilege {
-        let privilege = Arc::new(Privilege::default());
-        let (requests, asks) = mpsc::unbounded_channel();
-        (
-            Some(Prompts {
-                clock: privilege.clock(),
-                privilege,
-                requests,
-            }),
-            Some(asks),
-        )
-    } else {
-        (None, None)
-    };
-    let (prompts, mut asks) = prompts;
-
-    // Before the heartbeat's first draw, so the heading is not written over.
-    reporter.heading(command, total, options.fanout);
-    let heartbeat = Rc::new(Heartbeat::new(total, chrome));
-    let interrupt = Interrupt::install();
-
-    // The pdsh sliding window: at most `fanout` remote commands in flight, each
-    // one that finishes replaced by a pending Host.
-    let mut settling = stream::iter(selected)
-        .map(|host| {
-            let interrupt = interrupt.clone();
-            let heartbeat = Rc::clone(&heartbeat);
-            let prompts = prompts.clone();
-            async move {
-                // Checked here, not on entry, so a Host waiting for a slot
-                // does not start after an interrupt — and is not reported.
-                if interrupt.is_stopped() {
-                    return None;
-                }
-                heartbeat.start(&host.name);
-                Some(run_host(host, command, options.timeout, prompts, &interrupt).await)
-            }
-        })
-        .buffer_unordered(options.fanout as usize);
-
-    let mut ticker = tokio::time::interval(heartbeat::TICK);
-    // A missed tick means the run was busy, not that it owes several redraws.
-    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-
-    let mut outcomes = Vec::with_capacity(total);
-    let mut not_started = 0;
-    // Why the run could not carry on: nowhere to ask, or nothing typed.
-    let mut fatal = None;
-    loop {
-        tokio::select! {
-            next = settling.next() => match next {
-                Some(Some(outcome)) => {
-                    heartbeat.finish(&outcome);
-                    heartbeat.suspend(|| reporter.outcome(&outcome));
-                    outcomes.push(outcome);
-                }
-                Some(None) => not_started += 1,
-                None => break,
-            },
-            // A Host is asking for a password. Answered in this task, which
-            // owns the terminal and the heartbeat: one prompt for the run.
-            request = next_request(&mut asks) => match request {
-                Some(request) => {
-                    // A stopping run has nobody to type for it, and dropping
-                    // the receiver releases the Hosts still waiting.
-                    if interrupt.is_stopped() {
-                        asks = None;
-                        continue;
-                    }
-                    let privilege = &prompts.as_ref().expect("--privilege built one").privilege;
-                    // Off the terminal while the user types: the prompt is
-                    // written where the progress line is drawn.
-                    heartbeat.pause();
-                    let answer = privilege.answer(&request.host, request.unique).await;
-                    heartbeat.resume();
-                    let password = match answer {
-                        privilege::Answer::Password(password) => Some(password),
-                        // Nothing to write: the Host's sudo fails on its own,
-                        // and the run stops rather than repeating the failure.
-                        privilege::Answer::Refused => {
-                            fatal = privilege.fatal();
-                            interrupt.trigger();
-                            asks = None;
-                            None
-                        }
-                        privilege::Answer::Interrupted => {
-                            interrupt.trigger();
-                            asks = None;
-                            None
-                        }
-                    };
-                    let _ = request.reply.send(password);
-                }
-                // Every Host that could ask is gone.
-                None => asks = None,
-            },
-            _ = ticker.tick() => heartbeat.tick(),
-        }
-    }
-    drop(settling);
-    heartbeat.clear();
-
-    if let Some(reason) = &fatal {
-        eprintln!("rshx: {reason}");
-    }
-    reporter.summary(&outcomes, not_started, started.elapsed());
-    Ok(match fatal {
-        // A run rshx could not ask for a password is a local failure, not a
-        // Host's: the Hosts it cancelled never got to fail.
-        Some(_) => EXIT_LOCAL,
-        None => exit_code(&outcomes),
-    })
+    return execute_command(&selected, &command, options, &mut reporter).await;
 }
 
 /// The passwords a run asks for, and where a Host's stderr reader asks. Held
@@ -355,42 +250,68 @@ where
     (kept, truncated)
 }
 
-/// Runs the command on one Host, waiting at most `limit` for it.
-async fn run_host(
+/// The most of each stream kept in memory; past this the bytes are dropped.
+const STREAM_CAP: usize = 1024 * 1024;
+
+/// Reads a stream, keeping at most `cap` bytes. The rest is drained and
+/// thrown away: a Host that prints more than the cap must not grow rshx
+/// without bound, nor block on a full pipe, since ssh would then never exit.
+async fn read_capped<R>(mut stream: R, cap: usize) -> (Vec<u8>, bool)
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    let mut kept = Vec::new();
+    let mut buf = [0u8; 16 * 1024];
+    let mut truncated = false;
+    loop {
+        match stream.read(&mut buf).await {
+            Ok(0) => break,
+            Ok(n) => {
+                let room = cap.saturating_sub(kept.len());
+                let keep = room.min(n);
+                kept.extend_from_slice(&buf[..keep]);
+                truncated |= keep < n;
+            }
+            // The status comes from ssh's exit status, never a read error.
+            Err(_) => break,
+        }
+    }
+    (kept, truncated)
+}
+
+/// The run's exit code: `failed` and `unreachable` are separate bits, and a
+/// `timeout` counts as `unreachable`. A `cancelled` Host is not a failure —
+/// rshx stopped waiting — so an interrupted run exits 99 and nothing else.
+pub fn exit_code(outcomes: &[Outcome]) -> u8 {
+    if outcomes
+        .iter()
+        .any(|outcome| outcome.status == Status::Cancelled)
+    {
+        return EXIT_INTERRUPTED;
+    }
+    let mut code = EXIT_OK;
+    for outcome in outcomes {
+        match outcome.status {
+            Status::Failed => code |= EXIT_FAILED,
+            Status::Unreachable | Status::Timeout => code |= EXIT_UNREACHABLE,
+            Status::Ok | Status::Cancelled => {}
+        }
+    }
+    code
+}
+
+async fn run_remote_command(
+    mut child: Command,
     host: &Host,
-    command: &[String],
+    interrupt: &Interrupt,
     limit: Option<Duration>,
     prompts: Option<Prompts>,
-    interrupt: &Interrupt,
 ) -> Outcome {
-    let started = Instant::now();
-    let mut child = Command::new("ssh");
-    // Overrides become `-o` options rather than a rewritten destination, so
-    // `~/.ssh/config` stays the single source and the rest still applies.
-    if let Some(user) = &host.user {
-        child.arg("-o").arg(format!("User={user}"));
-    }
-    if let Some(port) = host.port {
-        child.arg("-o").arg(format!("Port={port}"));
-    }
-    if let Some(ip) = host.ip {
-        child.arg("-o").arg(format!("HostName={ip}"));
-    }
-    // Forwarded verbatim as ssh arguments, since ssh does its own joining.
-    // `--` ends option parsing, so a destination is never read as an option.
-    child.arg("--").arg(&host.name).args(command);
-    // Without `--privilege`, stdin is null so ssh cannot stop to prompt with
-    // nobody there to answer; with it, stdin carries the password to sudo.
-    child.stdin(if prompts.is_some() {
-        Stdio::piped()
-    } else {
-        Stdio::null()
-    });
-    child.stdout(Stdio::piped()).stderr(Stdio::piped());
     // Its own process group, so a terminal's interrupt reaches rshx alone and
     // rshx decides when its children die.
     child.process_group(0);
 
+    let started = Instant::now();
     match child.spawn() {
         Ok(mut running) => {
             let pid = match running.id() {
@@ -479,67 +400,161 @@ async fn run_host(
                 duration: started.elapsed(),
             }
         }
-        Err(err) => Outcome {
-            host: host.name.clone(),
-            status: Status::Unreachable,
-            exit_code: None,
-            // rshx's own failure to spawn ssh, not a diagnosis of the remote.
-            cause: None,
-            stdout: Vec::new(),
-            stderr: format!("rshx: could not run ssh: {err}\n").into_bytes(),
-            stdout_truncated: false,
-            stderr_truncated: false,
-            duration: started.elapsed(),
-        },
+        // rshx's own failure to spawn ssh, not a diagnosis of the remote.
+        Err(err) => Outcome::local_failure(
+            &host.name,
+            started.elapsed(),
+            format!("could not run ssh: {err}"),
+        ),
     }
 }
 
-/// The most of each stream kept in memory; past this the bytes are dropped.
-const STREAM_CAP: usize = 1024 * 1024;
+fn construct_ssh_basic_cmd(host: &Host) -> Command {
+    let mut child = Command::new("ssh");
+    // Overrides become `-o` options rather than a rewritten destination, so
+    // `~/.ssh/config` stays the single source and the rest still applies.
+    if let Some(user) = &host.user {
+        child.arg("-o").arg(format!("User={user}"));
+    }
+    if let Some(port) = host.port {
+        child.arg("-o").arg(format!("Port={port}"));
+    }
+    if let Some(ip) = host.ip {
+        child.arg("-o").arg(format!("HostName={ip}"));
+    }
+    // Forwarded verbatim as ssh arguments, since ssh does its own joining.
+    // `--` ends option parsing, so a destination is never read as an option.
+    child.arg("--").arg(&host.name);
+    child
+}
 
-/// Reads a stream, keeping at most `cap` bytes. The rest is drained and
-/// thrown away: a Host that prints more than the cap must not grow rshx
-/// without bound, nor block on a full pipe, since ssh would then never exit.
-async fn read_capped<R>(mut stream: R, cap: usize) -> (Vec<u8>, bool)
+fn init_prompts_and_asks(
+    options: &CliOptions,
+) -> (Option<Prompts>, Option<UnboundedReceiver<Request>>) {
+    if options.privilege {
+        let privilege = Arc::new(Privilege::default());
+        let (requests, asks) = mpsc::unbounded_channel();
+        (
+            Some(Prompts {
+                clock: privilege.clock(),
+                privilege,
+                requests,
+            }),
+            Some(asks),
+        )
+    } else {
+        (None, None)
+    }
+}
+
+async fn execute_on_hosts<F>(
+    selected: &Vec<&Host>,
+    options: &CliOptions,
+    reporter: &mut Reporter,
+    per_host: F,
+) -> Result<u8>
 where
-    R: tokio::io::AsyncRead + Unpin,
+    F: AsyncFn(&Host, &Interrupt, Option<Prompts>) -> Outcome,
 {
-    let mut kept = Vec::new();
-    let mut buf = [0u8; 16 * 1024];
-    let mut truncated = false;
-    loop {
-        match stream.read(&mut buf).await {
-            Ok(0) => break,
-            Ok(n) => {
-                let room = cap.saturating_sub(kept.len());
-                let keep = room.min(n);
-                kept.extend_from_slice(&buf[..keep]);
-                truncated |= keep < n;
-            }
-            // The status comes from ssh's exit status, never a read error.
-            Err(_) => break,
-        }
-    }
-    (kept, truncated)
-}
+    let started = Instant::now();
+    let total = selected.len();
 
-/// The run's exit code: `failed` and `unreachable` are separate bits, and a
-/// `timeout` counts as `unreachable`. A `cancelled` Host is not a failure —
-/// rshx stopped waiting — so an interrupted run exits 99 and nothing else.
-pub fn exit_code(outcomes: &[Outcome]) -> u8 {
-    if outcomes
-        .iter()
-        .any(|outcome| outcome.status == Status::Cancelled)
-    {
-        return EXIT_INTERRUPTED;
-    }
-    let mut code = EXIT_OK;
-    for outcome in outcomes {
-        match outcome.status {
-            Status::Failed => code |= EXIT_FAILED,
-            Status::Unreachable | Status::Timeout => code |= EXIT_UNREACHABLE,
-            Status::Ok | Status::Cancelled => {}
+    let (prompts, mut asks) = init_prompts_and_asks(options);
+
+    let heartbeat = Rc::new(Heartbeat::new(total, reporter.chrome()));
+    let interrupt = Interrupt::install();
+    let per_host = Rc::new(per_host);
+
+    // The pdsh sliding window: at most `fanout` remote commands in flight, each
+    // one that finishes replaced by a pending Host.
+    let mut settling = stream::iter(selected)
+        .map(|host| {
+            let interrupt = interrupt.clone();
+            let heartbeat = Rc::clone(&heartbeat);
+            let prompts = prompts.clone();
+            let per_host = Rc::clone(&per_host);
+            async move {
+                // Checked here, not on entry, so a Host waiting for a slot
+                // does not start after an interrupt — and is not reported.
+                if interrupt.is_stopped() {
+                    return None;
+                }
+                heartbeat.start(&host.name);
+                Some(per_host(host, &interrupt, prompts).await)
+            }
+        })
+        .buffer_unordered(options.fanout as usize);
+
+    let mut ticker = tokio::time::interval(heartbeat::TICK);
+    // A missed tick means the run was busy, not that it owes several redraws.
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+    let mut outcomes = Vec::with_capacity(total);
+    let mut not_started = 0;
+    // Why the run could not carry on: nowhere to ask, or nothing typed.
+    let mut fatal = None;
+    loop {
+        tokio::select! {
+            next = settling.next() => match next {
+                Some(Some(outcome)) => {
+                    heartbeat.finish(&outcome);
+                    heartbeat.suspend(|| reporter.outcome(&outcome));
+                    outcomes.push(outcome);
+                }
+                Some(None) => not_started += 1,
+                None => break,
+            },
+            // A Host is asking for a password. Answered in this task, which
+            // owns the terminal and the heartbeat: one prompt for the run.
+            request = next_request(&mut asks) => match request {
+                Some(request) => {
+                    // A stopping run has nobody to type for it, and dropping
+                    // the receiver releases the Hosts still waiting.
+                    if interrupt.is_stopped() {
+                        asks = None;
+                        continue;
+                    }
+                    let privilege = &prompts.as_ref().expect("--privilege built one").privilege;
+                    // Off the terminal while the user types: the prompt is
+                    // written where the progress line is drawn.
+                    heartbeat.pause();
+                    let answer = privilege.answer(&request.host, request.unique).await;
+                    heartbeat.resume();
+                    let password = match answer {
+                        privilege::Answer::Password(password) => Some(password),
+                        // Nothing to write: the Host's sudo fails on its own,
+                        // and the run stops rather than repeating the failure.
+                        privilege::Answer::Refused => {
+                            fatal = privilege.fatal();
+                            interrupt.trigger();
+                            asks = None;
+                            None
+                        }
+                        privilege::Answer::Interrupted => {
+                            interrupt.trigger();
+                            asks = None;
+                            None
+                        }
+                    };
+                    let _ = request.reply.send(password);
+                }
+                // Every Host that could ask is gone.
+                None => asks = None,
+            },
+            _ = ticker.tick() => heartbeat.tick(),
         }
     }
-    code
+    drop(settling);
+    heartbeat.clear();
+
+    if let Some(reason) = &fatal {
+        eprintln!("rshx: {reason}");
+    }
+    reporter.summary(&outcomes, not_started, started.elapsed());
+    Ok(match fatal {
+        // A run rshx could not ask for a password is a local failure, not a
+        // Host's: the Hosts it cancelled never got to fail.
+        Some(_) => EXIT_LOCAL,
+        None => exit_code(&outcomes),
+    })
 }

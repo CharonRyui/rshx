@@ -1,10 +1,10 @@
 # rshx
 
-Run one command on many hosts over ssh, with a bounded fanout and a readable
-per-host report.
+Run one command — or one script — on many hosts over ssh, with a bounded fanout
+and a readable per-host report.
 
 ```console
-$ rshx -H hosts.toml -- du -hs /data
+$ rshx -H hosts.toml run -- du -hs /data
 du -hs /data  ·  4 hosts
 node01 ok          0.31s  42G	/data
 node02 ok          0.28s  38G	/data
@@ -37,8 +37,13 @@ fanout never means more than 32 ssh processes.
 `unreachable` is a pure function of ssh's exit status. Text from ssh's stderr
 can add a `cause`, but it can never change a status or an exit code.
 
-rshx is not a configuration-management tool. It runs one command and reports
-what happened; there is no task model, no modules, and no YAML.
+**A script is sent, not fetched.** `--script` writes the file to the host over
+the ssh connection rshx already has, runs it there, and removes it. Nothing is
+installed, nothing is kept, and no host has to reach the machine rshx runs on.
+
+rshx is not a configuration-management tool. It runs one command or one script
+and reports what happened; there is no task model, no modules, no YAML, and no
+state between runs.
 
 ## Install
 
@@ -65,10 +70,12 @@ name = "node[01-04]"
 [groups]
 ascend = ["node[01-04]"]
 
-$ rshx -H hosts.toml -- uptime
-$ rshx -H hosts.toml -g ascend -- npu-smi info
-$ rshx -H hosts.toml -f 64 --timeout 30s -- systemctl status kubelet
-$ rshx -H hosts.toml --json -- hostname | jq -r '.host'
+$ rshx -H hosts.toml run -- uptime
+$ rshx -H hosts.toml -g ascend run -- npu-smi info
+$ rshx -H hosts.toml -f 64 --timeout 30s run -- systemctl status kubelet
+$ rshx -H hosts.toml run --script ./collect.sh
+$ rshx -H hosts.toml --json run -- hostname | jq -r '.host'
+$ rshx -H hosts.toml ping
 ```
 
 ## The host file
@@ -149,13 +156,18 @@ several groups are a union with each host appearing once. `-g all` selects
 every host in the file, which is also the default when `-g` is absent. `all` is
 reserved and cannot be declared as a group.
 
+Each `-g` takes one value, so `-g web,db` and `-g web -g db` both select two
+groups while `-g web db` does not: the options come before the subcommand, and
+a second bare word there would be read as the subcommand rather than as another
+group.
+
 ## Privilege
 
 `--privilege` runs each host's command under a remote `sudo`, and answers the
 password prompt when a host's sudo asks for one.
 
 ```console
-$ rshx -H hosts.toml --privilege -- systemctl restart nginx
+$ rshx -H hosts.toml --privilege run -- systemctl restart nginx
 sudo -S -p rshx-password: systemctl restart nginx · 4 hosts
 privilege password:
 node01 ok 0.42s
@@ -177,7 +189,7 @@ as it actually runs, plumbing included.
 To be another user, be it from root, which needs no password to do it:
 
 ```console
-$ rshx -H hosts.toml --privilege -- sh -c 'sudo -u postgres pg_dump mydb'
+$ rshx -H hosts.toml --privilege run -- sh -c 'sudo -u postgres pg_dump mydb'
 ```
 
 The password is asked for **once per run**, on the terminal, and written to
@@ -205,6 +217,58 @@ unique_privilege_pass = true
 A command that takes its password from an askpass program (`sudo -A`) needs no
 special case: the wrapper's sudo is the one that authenticates, and an inner
 `sudo -A` runs as root, where it has nothing to ask.
+
+## Scripts
+
+`run --script FILE` runs a local script on every host instead of a command:
+
+```console
+$ rshx -H hosts.toml run --script ./collect.sh
+./collect.sh (script)  ·  4 hosts
+node01 ok          0.31s
+node02 ok          0.28s
+node03 failed      0.12s
+  collect: /data: No such file or directory
+node04 unreachable 5.00s (connect)
+4 hosts: 2 ok, 1 failed, 1 unreachable in 5.02s
+```
+
+Each host gets its own copy, and every copy is sent over that host's ssh on
+stdin, so a script needs no scp, no shared filesystem, and no `authorized_keys`
+change. On the host rshx writes it to a temporary file, makes it executable,
+runs it, and removes it again — whatever the script exits with, so nothing is
+left behind. The script is run from the path it was copied to, so `$0`,
+`dirname "$0"` and a shebang all mean what they would locally; a script with no
+shebang is run by the host's shell, the way it would be if you typed its path.
+
+A script's own exit status is the host's: zero is `ok`, anything else is
+`failed`, and its output is reported exactly as a command's is. `--privilege`
+elevates the script to root, and only the script: the copy and the removal are
+the host user's own work, so a sudo that refuses a password still leaves no
+file behind.
+
+The script must be a readable regular file — a missing one, or a directory, is
+a local error, reported once before anything is sent anywhere. `--timeout`
+covers both steps: what the copy spends comes off what the run has left. A copy
+that exits zero without printing where it put the file leaves nothing to run:
+that host is reported `unreachable`, with rshx's note and the host's own output,
+and the script is not run there.
+
+## Ping
+
+`ping` runs `echo pong` on every selected host, which is the cheapest way to
+see which hosts answer:
+
+```console
+$ rshx -H hosts.toml ping
+hellohpc-ascend0 ok 0.28s  pong
+hellohpc-ascend1 ok 0.29s  pong
+2 hosts: 2 ok in 0.31s
+```
+
+It takes the same selection options as `run`, and reports through the same
+statuses, exit codes and `--json` output — a host that answers is `ok`, and one
+that does not is `unreachable`.
 
 ## Output
 
@@ -250,7 +314,7 @@ report never depends on colour to be read.
 omitted rather than written as `null`.
 
 ```console
-$ rshx -H hosts.toml --json -- du -hs /data | jq -c 'select(.status != "ok")'
+$ rshx -H hosts.toml --json run -- du -hs /data | jq -c 'select(.status != "ok")'
 {"host":"gpu02","status":"unreachable","exit_code":255,"cause":"auth","duration_ms":4,"stdout":"","stderr":"Permission denied (publickey).\n","truncated":false}
 ```
 
@@ -275,7 +339,7 @@ is a terminal: it is absent from a redirected stderr, and off entirely under
 alive rather than looking hung:
 
 ```console
-$ rshx -H hosts.toml -- du -hs /data
+$ rshx -H hosts.toml run -- du -hs /data
 du -hs /data  ·  200 hosts, fanout 32
 ⠸ 95/200 done ━━━━━━━━━━━━━━━━━━━╸───────────────────── 30 running, node096 0.4s
 ```
@@ -341,17 +405,19 @@ out the grace period.
 `rshx -h` prints:
 
 ```
-Run one command on many hosts over ssh
+Run operations on many hosts over ssh
 
-Usage: rshx [OPTIONS] -- <COMMAND>...
+Usage: rshx [OPTIONS] <COMMAND>
 
-Arguments:
-  <COMMAND>...  The command to run on every host, after `--`
+Commands:
+  run   Run command or script on hosts
+  ping  Check all hosts are available
+  help  Print this message or the help of the given subcommand(s)
 
 Options:
   -H, --host-file <FILE>    The host file listing the hosts to run on
   -f, --fanout <N>          How many commands run at once; a finish is replaced by a pending one [default: 32]
-  -g, --groups <GROUP>...   Run only the Hosts these groups select. Repeatable, each value may be comma-separated; defaults to every Host in the host file
+  -g, --groups <GROUP>      Run only the Hosts these groups select. Repeatable, each value may be comma-separated; defaults to every Host in the host file. One value per occurrence: a group name is never read as the subcommand
   -q, --quiet               Hide each Host's stdout
       --stderr              Show an `ok` Host's stderr; one that is not `ok` always shows stderr
       --privilege           Run the command as root, with `sudo`, answering its password prompt from the terminal when a Host asks. The command is wrapped whole, so an inner `sudo` keeps its own options and elevates a second time inside rshx's; a Host that needs its own password says so in the host file
@@ -361,6 +427,23 @@ Options:
   -h, --help                Print help (see more with '--help')
   -V, --version             Print version
 ```
+
+The options come before the subcommand; `rshx run -h` prints the run's own:
+
+```
+Run command or script on hosts
+
+Usage: rshx run <--script <SCRIPT_PATH>|COMMAND>
+
+Arguments:
+  [COMMAND]...  The command to run on every host, after `--`
+
+Options:
+      --script <SCRIPT_PATH>  Script file to run on every Host
+  -h, --help                  Print help (see more with '--help')
+```
+
+Exactly one of the two is given: a command after `--`, or `--script FILE`.
 
 The command goes after `--` and is forwarded to ssh verbatim as its own
 arguments — rshx does no shell joining, so ssh does it, exactly as it would if

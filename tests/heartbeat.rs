@@ -33,7 +33,7 @@ fn a_terminal_shows_a_heartbeat_that_is_gone_when_the_run_ends() {
         let file = harness.write("hosts.toml", SLOW_AND_QUICK);
 
         let out = run_on_tty(
-            on_terminal(harness, &file, &["--", "du -hs /data"]),
+            on_terminal(harness, &file, &["run", "--", "du -hs /data"]),
             Attach::STDERR_ONLY,
         );
 
@@ -74,6 +74,7 @@ fn a_redirected_stderr_gets_no_heartbeat_and_no_escape_sequences() {
             file.to_str().unwrap(),
             "-f",
             "3",
+            "run",
             "--",
             "du -hs /data",
         ]);
@@ -101,7 +102,7 @@ fn json_produces_no_heartbeat_even_on_a_terminal() {
         let file = harness.write("hosts.toml", SLOW_AND_QUICK);
 
         let out = run_on_tty(
-            on_terminal(harness, &file, &["--json", "--", "du -hs /data"]),
+            on_terminal(harness, &file, &["--json", "run", "--", "du -hs /data"]),
             Attach::STDERR_ONLY,
         );
 
@@ -132,7 +133,7 @@ fn result_lines_survive_the_heartbeat_on_a_terminal() {
         // Both streams on the terminal: the case where the heartbeat and the
         // results share a surface.
         let out = run_on_tty(
-            on_terminal(harness, &file, &["--", "du -hs /data"]),
+            on_terminal(harness, &file, &["run", "--", "du -hs /data"]),
             Attach::BOTH,
         );
 
@@ -157,7 +158,7 @@ fn the_counts_agree_with_the_closing_summary() {
         let file = harness.write("hosts.toml", SLOW_AND_QUICK);
 
         let out = run_on_tty(
-            on_terminal(harness, &file, &["--", "du -hs /data"]),
+            on_terminal(harness, &file, &["run", "--", "du -hs /data"]),
             Attach::STDERR_ONLY,
         );
 
@@ -185,7 +186,7 @@ fn a_single_host_is_reported_sensibly() {
         let file = harness.write("hosts.toml", ONE_SLOW);
 
         let out = run_on_tty(
-            on_terminal(harness, &file, &["--", "du -hs /data"]),
+            on_terminal(harness, &file, &["run", "--", "du -hs /data"]),
             Attach::STDERR_ONLY,
         );
 
@@ -217,7 +218,7 @@ fn a_run_with_no_hosts_in_flight_still_ends_cleanly() {
         harness.respond("slow01", Response::ok());
 
         let out = run_on_tty(
-            on_terminal(harness, &file, &["--", "true"]),
+            on_terminal(harness, &file, &["run", "--", "true"]),
             Attach::STDERR_ONLY,
         );
 
@@ -249,6 +250,7 @@ fn result_lines_are_intact_when_both_streams_go_to_one_file() {
             file.to_str().unwrap(),
             "-f",
             "3",
+            "run",
             "--",
             "du -hs /data",
         ]);
@@ -306,7 +308,10 @@ fn the_heartbeat_is_not_drawn_again_after_the_last_host_settles() {
         // Both streams on the terminal, so the heartbeat's frames and the
         // report's lines are one stream: their order in it is their order on
         // the screen.
-        let out = run_on_tty(on_terminal(harness, &file, &["--", "true"]), Attach::BOTH);
+        let out = run_on_tty(
+            on_terminal(harness, &file, &["run", "--", "true"]),
+            Attach::BOTH,
+        );
 
         assert_eq!(out.code, 0, "{}", out.stdout);
         // Every frame says how many Hosts are done; no line of the report ever

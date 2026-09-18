@@ -23,14 +23,9 @@ pub struct CliOptions {
     pub fanout: u32,
 
     /// Run only the Hosts these groups select. Repeatable, each value may be
-    /// comma-separated; defaults to every Host in the host file.
-    #[arg(
-        short = 'g',
-        long,
-        value_name = "GROUP",
-        value_delimiter = ',',
-        num_args = 1..
-    )]
+    /// comma-separated; defaults to every Host in the host file. One value per
+    /// occurrence: a group name is never read as the subcommand.
+    #[arg(short = 'g', long, value_name = "GROUP", value_delimiter = ',')]
     pub groups: Vec<String>,
 
     /// Hide each Host's stdout.
@@ -67,7 +62,11 @@ pub struct CliOptions {
 #[derive(Debug, Args)]
 #[group(required = true, multiple = false)]
 pub struct CliRunArgs {
-    /// Script file to run
+    /// Script file to run on every Host
+    ///
+    /// The script is copied to a temporary file on the Host, made executable,
+    /// run, and removed again. It runs as the Host's user, or as root under
+    /// `--privilege`.
     #[arg(long, value_name = "SCRIPT_PATH")]
     pub script: Option<PathBuf>,
 

@@ -52,6 +52,7 @@ fn the_command_is_rewritten_to_run_under_sudo() {
                     "-H",
                     file.to_str().unwrap(),
                     "--privilege",
+                    "run",
                     "--",
                     "du",
                     "-hs",
@@ -91,6 +92,7 @@ fn a_command_that_already_runs_sudo_is_wrapped_and_said_so() {
                 "-H",
                 file.to_str().unwrap(),
                 "--privilege",
+                "run",
                 "--",
                 "sudo",
                 "-u",
@@ -139,6 +141,7 @@ fn the_warning_is_coloured_when_colour_is_asked_for() {
                 "--color",
                 "always",
                 "--privilege",
+                "run",
                 "--",
                 "sudo",
                 "uptime",
@@ -161,6 +164,7 @@ fn the_warning_is_coloured_when_colour_is_asked_for() {
                 "-H",
                 file.to_str().unwrap(),
                 "--privilege",
+                "run",
                 "--",
                 "sudo",
                 "uptime",
@@ -187,7 +191,14 @@ fn a_command_that_does_not_run_sudo_is_not_warned_about() {
 
         let out = run({
             let mut cmd = harness.rshx();
-            cmd.args(["-H", file.to_str().unwrap(), "--privilege", "--", "uptime"]);
+            cmd.args([
+                "-H",
+                file.to_str().unwrap(),
+                "--privilege",
+                "run",
+                "--",
+                "uptime",
+            ]);
             cmd
         });
 
@@ -209,7 +220,14 @@ fn the_password_is_asked_for_once_and_shared_by_every_host() {
         let out = run_on_tty_answering(
             {
                 let mut cmd = harness.rshx();
-                cmd.args(["-H", file.to_str().unwrap(), "--privilege", "--", "uptime"]);
+                cmd.args([
+                    "-H",
+                    file.to_str().unwrap(),
+                    "--privilege",
+                    "run",
+                    "--",
+                    "uptime",
+                ]);
                 cmd
             },
             &[Typed::now("hunter2")],
@@ -268,6 +286,7 @@ fn a_host_that_needs_no_password_is_never_asked_about() {
                     "-f",
                     "1",
                     "--privilege",
+                    "run",
                     "--",
                     "uptime",
                 ]);
@@ -312,6 +331,7 @@ name = "node02"
                     "-f",
                     "1",
                     "--privilege",
+                    "run",
                     "--",
                     "uptime",
                 ]);
@@ -365,6 +385,7 @@ name = "node01"
                     file.to_str().unwrap(),
                     "--stderr",
                     "--privilege",
+                    "run",
                     "--",
                     "uptime",
                 ]);
@@ -415,7 +436,14 @@ name = "node01"
         let out = run_on_tty_answering(
             {
                 let mut cmd = harness.rshx();
-                cmd.args(["-H", file.to_str().unwrap(), "--privilege", "--", "uptime"]);
+                cmd.args([
+                    "-H",
+                    file.to_str().unwrap(),
+                    "--privilege",
+                    "run",
+                    "--",
+                    "uptime",
+                ]);
                 cmd
             },
             // sudo gives up after three, and each try is asked for again.
@@ -462,7 +490,14 @@ fn an_empty_password_stops_the_run() {
         let out = run_on_tty_answering(
             {
                 let mut cmd = harness.rshx();
-                cmd.args(["-H", file.to_str().unwrap(), "--privilege", "--", "uptime"]);
+                cmd.args([
+                    "-H",
+                    file.to_str().unwrap(),
+                    "--privilege",
+                    "run",
+                    "--",
+                    "uptime",
+                ]);
                 cmd
             },
             &[Typed::now("")],
@@ -490,7 +525,14 @@ fn with_no_terminal_a_password_cannot_be_asked_for() {
         // No session, no controlling terminal: `/dev/tty` is not there to open.
         let out = run_detached({
             let mut cmd = harness.rshx();
-            cmd.args(["-H", file.to_str().unwrap(), "--privilege", "--", "uptime"]);
+            cmd.args([
+                "-H",
+                file.to_str().unwrap(),
+                "--privilege",
+                "run",
+                "--",
+                "uptime",
+            ]);
             cmd
         });
 
@@ -542,6 +584,7 @@ unique_privilege_pass = true
                         "--timeout",
                         "1s",
                         "--privilege",
+                        "run",
                         "--",
                         "uptime",
                     ]);
@@ -596,6 +639,7 @@ fn another_hosts_prompt_is_not_this_hosts_time() {
                     "--timeout",
                     "1s",
                     "--privilege",
+                    "run",
                     "--",
                     "uptime",
                 ]);
@@ -634,7 +678,7 @@ fn without_privilege_the_command_and_the_stdin_are_untouched() {
 
         let out = run({
             let mut cmd = harness.rshx();
-            cmd.args(["-H", file.to_str().unwrap(), "--", "uptime"]);
+            cmd.args(["-H", file.to_str().unwrap(), "run", "--", "uptime"]);
             cmd
         });
 
