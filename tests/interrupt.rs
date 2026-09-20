@@ -227,7 +227,7 @@ fn hosts_that_already_settled_keep_their_real_status() {
 }
 
 #[test]
-fn the_report_says_the_remote_command_may_still_be_running() {
+fn a_cancelled_host_is_stopped_on_the_host_itself() {
     with_harness(|harness| {
         harness.respond_default(Response::ok().delay_ms(30_000));
         let child = start(harness, &["-f", "3", "run", "--", "sleep 30"]);
@@ -235,15 +235,71 @@ fn the_report_says_the_remote_command_may_still_be_running() {
             harness.processes().len() == 3
         });
         interrupt(&child);
-        let (_, _, stderr) = collect(child);
+        let (code, _, stderr) = collect(child);
 
+        assert_eq!(code, 99, "{stderr}");
+        let stops = harness.stops();
+        assert_eq!(
+            stops.len(),
+            3,
+            "killing a Host's ssh is not stopping its command, so each one is asked to stop it: {stops:?}"
+        );
+        for host in ["node01", "node02", "node03"] {
+            let stop = stops
+                .iter()
+                .find(|argv| argv.iter().any(|arg| arg == host))
+                .unwrap_or_else(|| panic!("{host} is stopped: {stops:?}"));
+            assert!(
+                stop.iter().any(|arg| arg == "BatchMode=yes"),
+                "a stop cannot prompt for anything of its own: {stop:?}"
+            );
+            assert!(
+                stop.iter().any(|arg| arg.contains(&format!("-{host}.pid"))),
+                "the stop names the marker this Host's command was given: {stop:?}"
+            );
+            assert!(
+                stop.iter().any(|arg| arg.contains("ps -A -o pid=,ppid=")),
+                "and stops the command's whole tree, not just the shell: {stop:?}"
+            );
+        }
         assert!(
-            stderr.contains("stopped waiting"),
-            "the report does not claim the remote work stopped: {stderr}"
+            !stderr.contains("may still be running"),
+            "the commands were stopped, so the report does not hedge: {stderr}"
+        );
+    });
+}
+
+#[test]
+fn a_host_rshx_cannot_stop_says_so() {
+    with_harness(|harness| {
+        harness.respond_default(Response::ok().delay_ms(30_000));
+        harness.respond(
+            "stop",
+            Response::failed(255)
+                .stderr("ssh: connect to host node01 port 22: Connection refused\n"),
+        );
+        let child = start(harness, &["-f", "3", "run", "--", "sleep 30"]);
+        wait_until("all three hosts to be in flight", || {
+            harness.processes().len() == 3
+        });
+        interrupt(&child);
+        let (code, stdout, stderr) = collect(child);
+
+        assert_eq!(
+            code, 99,
+            "a stop that failed is not a Host's failure: {stderr}"
+        );
+        assert!(
+            stdout.contains("rshx: could not stop the remote command:"),
+            "what rshx could not finish is said plainly, with the Host: {stdout}"
+        );
+        assert!(
+            stdout.contains("Connection refused"),
+            "with the reason the Host gave: {stdout}"
         );
         assert!(
             stderr.contains("may still be running"),
-            "and says so plainly: {stderr}"
+            "and the commands rshx could not stop are owned up to: {stderr}"
         );
     });
 }

@@ -48,7 +48,7 @@ pub struct CliOptions {
 
     /// How long to wait for any one Host, such as `30s` or `5m`; without it
     /// there is no limit. A Host that times out is reported as `timeout`, its
-    /// ssh is terminated, and the remote command is not stopped.
+    /// ssh is terminated, and the command is stopped on the Host.
     #[arg(long, value_name = "DURATION", value_parser = humantime::parse_duration)]
     pub timeout: Option<std::time::Duration>,
 

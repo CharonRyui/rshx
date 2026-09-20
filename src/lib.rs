@@ -7,6 +7,7 @@ pub mod heartbeat;
 pub mod host;
 pub mod interrupt;
 pub mod privilege;
+pub mod remote;
 pub mod report;
 pub mod run;
 

@@ -169,6 +169,7 @@ impl Reporter {
             stdout: String::from_utf8_lossy(&outcome.stdout),
             stderr: String::from_utf8_lossy(&outcome.stderr),
             truncated: outcome.stdout_truncated || outcome.stderr_truncated,
+            remote_stopped: outcome.remote_stopped,
         };
         match serde_json::to_string(&line) {
             Ok(text) => {
@@ -263,16 +264,26 @@ impl Reporter {
             self.summary_line(outcomes, not_started, elapsed)
         );
         // A run cut short must not read as though the remote work stopped.
-        if outcomes
+        // rshx stops every command it cut short, so the note is only owed for
+        // the Hosts it could not: one that never started has nothing running,
+        // and a Host whose ssh rshx never got a marker for never ran anything.
+        let cut_short = outcomes
             .iter()
-            .any(|outcome| outcome.status.is_unfinished())
-        {
+            .filter(|outcome| outcome.status.is_unfinished());
+        let count = cut_short.clone().count();
+        let stopped = cut_short.filter(|outcome| outcome.remote_stopped).count();
+        if stopped < count {
             let style = self.styles.cancelled;
+            let note = if stopped == 0 {
+                UNFINISHED_NOTE
+            } else {
+                PARTLY_STOPPED_NOTE
+            };
             let _ = writeln!(
                 self.stderr,
                 "{}{}{}",
                 style.render(),
-                UNFINISHED_NOTE,
+                note,
                 style.render_reset()
             );
         }
@@ -317,6 +328,11 @@ impl Reporter {
 /// Said once, under the summary, when a run stopped waiting for anything.
 const UNFINISHED_NOTE: &str =
     "cancelled and timeout mean rshx stopped waiting; the remote commands may still be running";
+
+/// Said instead when rshx stopped some of the commands it cut short: the rest
+/// are Hosts it could not reach again, and their commands are still there.
+const PARTLY_STOPPED_NOTE: &str =
+    "rshx stopped the remote commands it cut short, except where it says otherwise above";
 
 /// The width the status column is padded to: the longest status, so a run with
 /// mixed outcomes still lines its durations and output up. Static, so the
@@ -391,6 +407,9 @@ struct JsonLine<'a> {
     stderr: std::borrow::Cow<'a, str>,
     /// Whether either stream lost bytes to rshx's cap.
     truncated: bool,
+    /// Whether rshx stopped the Host's remote command. `false` on a `cancelled`
+    /// or `timeout` Host means its command may still be running there.
+    remote_stopped: bool,
 }
 
 /// Written where a stream lost bytes to rshx's cap.

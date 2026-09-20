@@ -16,6 +16,7 @@ use crate::heartbeat::{self, Heartbeat};
 use crate::host::{self, Host};
 use crate::interrupt::{self, Interrupt};
 use crate::privilege::{self, Privilege, PromptClock, Request};
+use crate::remote;
 use crate::report::{self, Reporter};
 use crate::run::command::execute_command;
 use crate::run::script::execute_local_script;
@@ -85,6 +86,10 @@ pub struct Outcome {
     /// Whether rshx dropped bytes past its cap.
     pub stdout_truncated: bool,
     pub stderr_truncated: bool,
+    /// Whether rshx stopped the Host's remote command. `false` on a Host rshx
+    /// cut short means the command may still be running there: the report says
+    /// so rather than claiming work that was not done.
+    pub remote_stopped: bool,
     pub duration: Duration,
 }
 
@@ -102,6 +107,8 @@ impl Outcome {
             stderr: format!("rshx: {message}\n").into_bytes(),
             stdout_truncated: false,
             stderr_truncated: false,
+            // Nothing ran remotely, so there is nothing to have stopped.
+            remote_stopped: false,
             duration,
         }
     }
@@ -287,7 +294,7 @@ const STREAM_CAP: usize = 1024 * 1024;
 /// Reads a stream, keeping at most `cap` bytes. The rest is drained and
 /// thrown away: a Host that prints more than the cap must not grow rshx
 /// without bound, nor block on a full pipe, since ssh would then never exit.
-async fn read_capped<R>(mut stream: R, cap: usize) -> (Vec<u8>, bool)
+pub(crate) async fn read_capped<R>(mut stream: R, cap: usize) -> (Vec<u8>, bool)
 where
     R: tokio::io::AsyncRead + Unpin,
 {
@@ -337,6 +344,7 @@ async fn run_remote_command(
     interrupt: &Interrupt,
     limit: Option<Duration>,
     prompts: Option<Prompts>,
+    marker: Option<&str>,
 ) -> Outcome {
     // Its own process group, so a terminal's interrupt reaches rshx alone and
     // rshx decides when its children die.
@@ -413,22 +421,47 @@ async fn run_remote_command(
                 Status::Failed | Status::Unreachable => Cause::infer(&stderr),
                 _ => None,
             };
-            let stderr = match waited {
+            let mut stderr = match waited {
                 Ok(_) => stderr,
                 Err(err) => format!("rshx: could not read ssh's exit status: {err}\n").into_bytes(),
             };
+            // The Host's own time, taken before the stop below: that is rshx
+            // tidying up after the Host, not the Host still working.
+            let duration = started.elapsed();
+            // Killing a Host's ssh does not stop what it started, so a Host
+            // rshx cut short is asked to stop its own command, by the marker
+            // written before that command ran.
+            let mut remote_stopped = false;
+            if (killed || timed_out)
+                && let Some(marker) = marker
+            {
+                let password = prompts.as_ref().and_then(|prompts| {
+                    prompts
+                        .privilege
+                        .password_for(&host.name, host.unique_privilege_pass)
+                });
+                match remote::stop(host, marker, prompts.is_some(), password.as_deref()).await {
+                    Ok(()) => remote_stopped = true,
+                    // The Host's status is settled; this says what rshx could
+                    // not finish, which its own output cannot.
+                    Err(reason) => stderr.extend_from_slice(
+                        format!("rshx: could not stop the remote command: {reason}\n").as_bytes(),
+                    ),
+                }
+            }
             Outcome {
                 host: host.name.clone(),
                 status,
                 // Absent when rshx ended the child: its exit status says
-                // nothing about the command, which may still be running.
+                // nothing about the command, which rshx stops on its own.
                 exit_code: if killed || timed_out { None } else { exit_code },
                 cause,
                 stdout,
                 stderr,
                 stdout_truncated,
                 stderr_truncated,
-                duration: started.elapsed(),
+                remote_stopped,
+                duration,
             }
         }
         // rshx's own failure to spawn ssh, not a diagnosis of the remote.
@@ -438,25 +471,6 @@ async fn run_remote_command(
             format!("could not run ssh: {err}"),
         ),
     }
-}
-
-fn construct_ssh_basic_cmd(host: &Host) -> Command {
-    let mut child = Command::new("ssh");
-    // Overrides become `-o` options rather than a rewritten destination, so
-    // `~/.ssh/config` stays the single source and the rest still applies.
-    if let Some(user) = &host.user {
-        child.arg("-o").arg(format!("User={user}"));
-    }
-    if let Some(port) = host.port {
-        child.arg("-o").arg(format!("Port={port}"));
-    }
-    if let Some(ip) = host.ip {
-        child.arg("-o").arg(format!("HostName={ip}"));
-    }
-    // Forwarded verbatim as ssh arguments, since ssh does its own joining.
-    // `--` ends option parsing, so a destination is never read as an option.
-    child.arg("--").arg(&host.name);
-    child
 }
 
 fn init_prompts_and_asks(

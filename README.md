@@ -230,6 +230,30 @@ stdout carries the listing and nothing else, so `rshx list > hosts.txt` gives a
 file of names, and the exit code is `0` unless the host file or the selection
 was itself an error.
 
+## Running a command
+
+Everything after `--` is the command. rshx joins those words into one line and
+hands it to the host, which runs it with `sh`:
+
+```console
+$ rshx -H hosts.toml run -- du -hs /data
+```
+
+The host's *login* shell — whatever its user happens to run, from a POSIX `sh`
+to fish — is only asked to start that `sh` and hand it the line, so a host whose
+user keeps a shell of their own runs the command exactly as any other does.
+Write the command as `sh` will read it: the words are joined with spaces, so a
+word holding one is split there, and quoting for the host's shell is what keeps
+it together — `run -- sh -c 'psql -c "select 1"'`.
+
+Each command is named on the host before it runs — the pid of that `sh`, in a
+file of rshx's own under `/tmp` — and the name is removed when the command ends,
+whatever it exited with. That is what lets rshx stop a host's work when the run
+is cut short: killing the local ssh leaves the command running with nobody
+watching, so rshx opens a second connection to read the name and stop everything
+below it. The second connection is best-effort, and a host rshx cannot reach
+again is reported as one whose command may still be running.
+
 ## Privilege
 
 `--privilege` runs each host's command under a remote `sudo`, and answers the
@@ -384,7 +408,7 @@ omitted rather than written as `null`.
 
 ```console
 $ rshx -H hosts.toml --json run -- du -hs /data | jq -c 'select(.status != "ok")'
-{"host":"gpu02","status":"unreachable","exit_code":255,"cause":"auth","duration_ms":4,"stdout":"","stderr":"Permission denied (publickey).\n","truncated":false}
+{"host":"gpu02","status":"unreachable","exit_code":255,"cause":"auth","duration_ms":4,"stdout":"","stderr":"Permission denied (publickey).\n","truncated":false,"remote_stopped":false}
 ```
 
 Because ssh reports a failed connection with its own exit status, an
@@ -399,6 +423,7 @@ authentication failure is `unreachable` — the command never ran — not `faile
 | `duration_ms` | How long the host took. |
 | `stdout` / `stderr` | Captured verbatim, as JSON strings. |
 | `truncated` | Whether either stream lost bytes to the cap. |
+| `remote_stopped` | Whether rshx stopped the host's command there. `false` on a `cancelled` or `timeout` host means rshx could not, and the command may still be running. |
 
 ## Progress
 
@@ -430,8 +455,14 @@ never touches stdout.
 | `ok` | The command ran and returned zero. |
 | `failed` | The command ran and returned non-zero. |
 | `unreachable` | ssh itself failed, so the command never ran. |
-| `timeout` | rshx gave up waiting. The remote command is **not** stopped and may still be running. |
-| `cancelled` | The run was interrupted before the host's outcome was known. Also not stopped. |
+| `timeout` | rshx gave up waiting, and stopped the command on the host. |
+| `cancelled` | The run was interrupted before the host's outcome was known; the command was stopped the same way. |
+
+Stopping the command is rshx tidying up after itself, not a verdict on the
+command: a host cut short is `cancelled` or `timeout`, never `failed`. A host
+rshx could not stop is reported as one whose command may still be running, both
+under the summary and in its `stderr`. A command that had already ended leaves
+no marker behind, so a stop that finds nothing to stop is not a failure.
 
 A `cause` is a best-effort explanation read from ssh's stderr — `auth`, `dns`
 or `connect` — and it never changes a status or an exit code. It is absent when
@@ -455,9 +486,8 @@ a run that was interrupted exits `99` and nothing else.
 ## Timeouts and interrupts
 
 `--timeout 30s` bounds how long rshx waits for any one host. On expiry the
-host's ssh is terminated and reported as `timeout`; every other host carries
-on. The remote command is not stopped — rshx killed the connection, not the
-work — and it says so under the summary.
+host's ssh is terminated, its command is stopped on the host itself, and it is
+reported as `timeout`; every other host carries on.
 
 A host waiting at a `--privilege` password prompt is not taking too long: the
 time it spends at the prompt is subtracted from what its limit measures, and
@@ -466,8 +496,9 @@ another host's prompt is up keeps counting, and can still time out.
 
 Ctrl-C stops the run: hosts still in flight are `cancelled`, hosts that had
 already settled keep their real status, and hosts that never started are not
-reported at all, since their command never ran. A second Ctrl-C does not wait
-out the grace period.
+reported at all, since their command never ran. Each host in flight has its
+command stopped there, as a timeout does. A second Ctrl-C does not wait out the
+grace period.
 
 ## Options
 
@@ -491,7 +522,7 @@ Options:
   -q, --quiet               Hide each Host's stdout
       --stderr              Show an `ok` Host's stderr; one that is not `ok` always shows stderr
       --privilege           Run the command as root, with `sudo`, answering its password prompt from the terminal when a Host asks. The command is wrapped whole, so an inner `sudo` keeps its own options and elevates a second time inside rshx's; a Host that needs its own password says so in the host file
-      --timeout <DURATION>  How long to wait for any one Host, such as `30s` or `5m`; without it there is no limit. A Host that times out is reported as `timeout`, its ssh is terminated, and the remote command is not stopped
+      --timeout <DURATION>  How long to wait for any one Host, such as `30s` or `5m`; without it there is no limit. A Host that times out is reported as `timeout`, its ssh is terminated, and the command is stopped on the Host
       --json                Write one JSON object per Host, one per line, instead of the plain report. stdout carries nothing else, and the heartbeat is off
       --color <COLOR>       When to colour the report [default: auto] [possible values: auto, always, never]
   -h, --help                Print help (see more with '--help')

@@ -31,12 +31,16 @@ name = "node02"
 /// rshx ever stops setting it.
 const MARKER: &str = "rshx-password:";
 
-fn sudo_argv(harness: &support::Harness, dest: &str) -> Vec<String> {
-    harness
-        .invocations()
-        .into_iter()
-        .find(|argv| argv.get(1).map(String::as_str) == Some(dest))
-        .unwrap_or_else(|| panic!("{dest} was invoked"))
+/// The command rshx asked `dest`'s ssh to run, as the Host's shell will parse
+/// it.
+///
+/// rshx wraps every command in a marker — a write of the shell's pid before it,
+/// and a removal of that marker after it — so that a Host cut short can be
+/// stopped on the far side. That is plumbing, and what these tests are about is
+/// the command itself, so the wrapper is stripped here rather than written into
+/// every expectation.
+fn sudo_command(harness: &support::Harness, dest: &str) -> String {
+    harness.command_for(dest)
 }
 
 #[test]
@@ -65,10 +69,8 @@ fn the_command_is_rewritten_to_run_under_sudo() {
 
         assert_eq!(out.code, 0, "stderr: {}", out.stderr);
         assert_eq!(
-            sudo_argv(harness, "node01"),
-            vec![
-                "--", "node01", "sudo", "-S", "-p", MARKER, "du", "-hs", "/data"
-            ],
+            sudo_command(harness, "node01"),
+            "sudo -S -p rshx-password: du -hs /data",
             "the command is run under a sudo that reads stdin and says so with rshx's prompt"
         );
         // The heading names what actually runs, not what was typed.
@@ -107,11 +109,8 @@ fn a_command_that_already_runs_sudo_is_wrapped_and_said_so() {
         // The command is wrapped whole, its own options untouched: it elevates
         // a second time inside rshx's, as root, where it authenticates nothing.
         assert_eq!(
-            sudo_argv(harness, "node01"),
-            vec![
-                "--", "node01", "sudo", "-S", "-p", MARKER, "sudo", "-u", "postgres", "psql", "-c",
-                "select 1"
-            ],
+            sudo_command(harness, "node01"),
+            "sudo -S -p rshx-password: sudo -u postgres psql -c select 1",
             "the command's own sudo keeps every one of its options"
         );
         assert_eq!(out.code, 0, "stderr: {}", out.stderr);
@@ -686,13 +685,80 @@ fn without_privilege_the_command_and_the_stdin_are_untouched() {
         // anyway is answered by nobody: it gets an empty stdin and fails.
         assert_eq!(out.code, 2, "{}", out.stderr);
         assert_eq!(
-            sudo_argv(harness, "node01"),
-            vec!["--", "node01", "uptime"],
+            sudo_command(harness, "node01"),
+            "uptime",
             "the command is forwarded verbatim"
         );
         assert!(
             harness.passwords().is_empty(),
             "no password is written without `--privilege`"
+        );
+    });
+}
+
+#[test]
+fn a_stopped_host_is_reached_with_the_password_already_given() {
+    with_harness(|harness| {
+        let file = harness.write("hosts.toml", THREE);
+        // The command asks for the password, then runs long enough to be cut
+        // short. The stop connection asks too, so the test can see what rshx
+        // sent it.
+        harness.respond_default(Response::ok().prompt("hunter2").delay_ms(30_000));
+        harness.respond("stop", Response::ok().prompt("hunter2"));
+
+        let out = run_on_tty_answering(
+            {
+                let mut cmd = harness.rshx();
+                cmd.args([
+                    "-H",
+                    file.to_str().unwrap(),
+                    "--timeout",
+                    "1s",
+                    "--privilege",
+                    "run",
+                    "--",
+                    "uptime",
+                ]);
+                cmd
+            },
+            &[Typed::now("hunter2")],
+        );
+
+        assert_eq!(out.code, 4, "a timeout: {}", out.stderr);
+        let stops = harness.stops();
+        assert_eq!(stops.len(), 3, "every Host cut short is stopped: {stops:?}");
+        for stop in &stops {
+            let sudo = stop
+                .iter()
+                .position(|arg| arg == "sudo")
+                .unwrap_or_else(|| panic!("the stop runs as root: {stop:?}"));
+            assert_eq!(
+                &stop[sudo..sudo + 5],
+                ["sudo", "-S", "-p", "", "--"],
+                "the stop runs as root without prompting for itself: {stop:?}"
+            );
+            assert!(
+                !stop.iter().any(|arg| arg == "-n"),
+                "and without `-n`, which would make sudo refuse the password rshx has: {stop:?}"
+            );
+        }
+        // Each Host read the password twice: once for its command, once for its
+        // stop. A stop that had been sent nothing would have failed instead.
+        let mut asked: Vec<String> = harness
+            .passwords()
+            .into_iter()
+            .map(|(dest, _)| dest)
+            .collect();
+        asked.sort_unstable();
+        assert_eq!(
+            asked,
+            vec!["node01", "node01", "node02", "node02", "node03", "node03"],
+            "the password the user gave is written to the stop as well"
+        );
+        assert!(
+            !out.stdout.contains("could not stop"),
+            "so no Host is reported as unstoppable: {}",
+            out.stdout
         );
     });
 }

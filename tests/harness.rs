@@ -219,20 +219,23 @@ fn every_invocation_is_recorded_as_one_intact_record() {
             "every Host is recorded once, not merged or dropped: {invocations:?}"
         );
         for argv in &invocations {
-            assert_eq!(
-                argv.len(),
-                command.len() + 2,
-                "a record is one invocation, whole: {argv:?}"
-            );
+            // The wrapper is one word: the marker written before the command,
+            // the command, and the marker removed after it.
+            assert_eq!(argv.len(), 3, "a record is one invocation, whole: {argv:?}");
             assert_eq!(argv[0], "--", "the separator leads the record: {argv:?}");
             assert!(
                 hosts.contains(&argv[1]),
                 "the destination follows it: {argv:?}"
             );
-            assert_eq!(
-                &argv[2..],
-                command,
-                "and the command is its own arguments, never joined: {argv:?}"
+            let wrapper = &argv[2];
+            assert!(
+                wrapper.starts_with("sh -c 'm=/tmp/rshx-")
+                    && wrapper.contains(&format!("-{}.pid;", argv[1])),
+                "the marker names this Host, and is written before anything runs: {wrapper}"
+            );
+            assert!(
+                wrapper.contains(&format!(r#""$m" 2>/dev/null; ( {} );"#, command.join(" "))),
+                "and the command is handed over whole, never split by rshx: {wrapper}"
             );
         }
         let mut seen: Vec<&str> = invocations.iter().map(|argv| argv[1].as_str()).collect();

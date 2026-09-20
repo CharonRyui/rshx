@@ -57,6 +57,12 @@ fn copying(harness: &support::Harness) -> std::path::PathBuf {
     harness.write("deploy.sh", SCRIPT)
 }
 
+/// The command a Host runs the copied script with, as the one line the Host's
+/// shell parses.
+fn run_text(path: &str, privilege: bool) -> String {
+    run_argv(path, privilege).join(" ")
+}
+
 #[test]
 fn the_script_is_copied_to_a_temporary_file_and_run_from_it() {
     with_harness(|harness| {
@@ -85,21 +91,12 @@ fn the_script_is_copied_to_a_temporary_file_and_run_from_it() {
         });
 
         assert_eq!(out.code, 0, "stderr: {}", out.stderr);
-        let expected: Vec<Vec<String>> = vec![
-            ["--", "node01"]
-                .into_iter()
-                .map(str::to_string)
-                .chain(std::iter::once(COPY.to_string()))
-                .collect(),
-            ["--", "node01"]
-                .into_iter()
-                .map(str::to_string)
-                .chain(run_argv(PATH, false))
-                .collect(),
-        ];
         assert_eq!(
-            harness.invocations(),
-            expected,
+            harness.commands(),
+            vec![
+                ("node01".to_string(), COPY.to_string()),
+                ("node01".to_string(), run_text(PATH, false)),
+            ],
             "the copy runs first, and the run names the path the copy printed"
         );
         assert_eq!(
@@ -191,18 +188,13 @@ fn every_host_gets_its_own_copy_and_runs_its_own_path() {
         });
 
         assert_eq!(out.code, 0, "stderr: {}", out.stderr);
-        let invocations = harness.invocations();
-        assert_eq!(invocations.len(), 6, "two per Host: {invocations:?}");
+        let commands = harness.commands();
+        assert_eq!(commands.len(), 6, "two per Host: {commands:?}");
         for (index, host) in ["node01", "node02", "node03"].iter().enumerate() {
             let path = format!("/tmp/tmp.{index}");
-            let expected: Vec<String> = ["--", host]
-                .into_iter()
-                .map(str::to_string)
-                .chain(run_argv(&path, false))
-                .collect();
             assert!(
-                invocations.contains(&expected),
-                "{host} runs the file it was sent, not another Host's: {invocations:?}"
+                commands.contains(&(host.to_string(), run_text(&path, false))),
+                "{host} runs the file it was sent, not another Host's: {commands:?}"
             );
             assert_eq!(
                 harness.raw_stdin(host),
@@ -317,21 +309,15 @@ fn privilege_elevates_the_whole_chain_and_not_the_copy() {
         });
 
         assert_eq!(out.code, 0, "stderr: {}", out.stderr);
-        let expected: Vec<Vec<String>> = vec![
-            // The copy writes where the Host's user may write, and removing it
-            // is theirs to do; only the run itself is elevated.
-            ["--", "node01"]
-                .into_iter()
-                .map(str::to_string)
-                .chain(std::iter::once(COPY.to_string()))
-                .collect(),
-            ["--", "node01"]
-                .into_iter()
-                .map(str::to_string)
-                .chain(run_argv(PATH, true))
-                .collect(),
-        ];
-        assert_eq!(harness.invocations(), expected);
+        // The copy writes where the Host's user may write, and removing it is
+        // theirs to do; only the run itself is elevated.
+        assert_eq!(
+            harness.commands(),
+            vec![
+                ("node01".to_string(), COPY.to_string()),
+                ("node01".to_string(), run_text(PATH, true)),
+            ]
+        );
     });
 }
 
@@ -370,7 +356,18 @@ fn the_limit_covers_the_copy_and_the_run_together() {
             "the two steps share one limit: {:?}",
             out.stdout
         );
-        assert_eq!(harness.invocations().len(), 2, "both steps were started");
+        assert_eq!(
+            harness.invocations().len(),
+            3,
+            "the copy and the run were started, and the Host was stopped: {:?}",
+            harness.invocations()
+        );
+        assert_eq!(
+            harness.stops().len(),
+            1,
+            "the Host that ran out of time had its script stopped there: {:?}",
+            harness.stops()
+        );
     });
 }
 

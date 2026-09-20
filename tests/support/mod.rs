@@ -263,9 +263,67 @@ impl Harness {
         cmd
     }
 
-    /// Every invocation the fake ssh saw, as its argv.
+    /// Every invocation the fake ssh saw, as its argv. A stop connection — the
+    /// one rshx makes to stop a Host's command — is one of these.
+    ///
+    /// The stub terminates each record with RS rather than a newline, so an
+    /// argument holding a newline of its own is read back whole, and an empty
+    /// argument — `-p ''`, say — is read back as the empty string it is.
     pub fn invocations(&self) -> Vec<Vec<String>> {
-        self.records("argv", '\u{1f}')
+        fs::read_to_string(self.dir.join("argv"))
+            .unwrap_or_default()
+            .split('\u{1e}')
+            .filter(|record| !record.is_empty())
+            .map(|record| {
+                // The stub writes a separator after every argument, so the
+                // record ends in one; it is not an argument of its own.
+                record
+                    .strip_suffix('\u{1f}')
+                    .unwrap_or(record)
+                    .split('\u{1f}')
+                    .map(str::to_string)
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// Every stop connection rshx made, as its argv: one per Host it cut short
+    /// and could reach again. A stop is the only invocation carrying
+    /// `BatchMode=yes`.
+    pub fn stops(&self) -> Vec<Vec<String>> {
+        self.invocations()
+            .into_iter()
+            .filter(|argv| argv.iter().any(|arg| arg == "BatchMode=yes"))
+            .collect()
+    }
+
+    /// The command rshx asked each Host's ssh to run, as `(destination, text)`.
+    ///
+    /// A command is wrapped before it goes out — in a marker, so that a Host
+    /// cut short can be stopped there — and the wrapper is handed to ssh as one
+    /// word. This takes the wrapper off, leaving the text the Host's shell
+    /// parses, which is what a test is about. A stop connection is not a
+    /// command and is left out.
+    pub fn commands(&self) -> Vec<(String, String)> {
+        self.invocations()
+            .into_iter()
+            .filter_map(|argv| {
+                let separator = argv.iter().position(|arg| arg == "--")?;
+                let destination = argv.get(separator + 1)?.clone();
+                let text = unwrap_command(argv.last()?)?;
+                Some((destination, text))
+            })
+            .collect()
+    }
+
+    /// The command one Host was asked to run, or a panic naming the Host that
+    /// was never asked to run anything.
+    pub fn command_for(&self, destination: &str) -> String {
+        self.commands()
+            .into_iter()
+            .find(|(dest, _)| dest == destination)
+            .unwrap_or_else(|| panic!("{destination} was never asked to run a command"))
+            .1
     }
 
     /// Every password the fake ssh read from its stdin, as `(destination,
@@ -282,14 +340,16 @@ impl Harness {
             .collect()
     }
 
-    /// One entry per fake ssh run: its pid, its process group and its session.
+    /// One entry per fake ssh run of a Host's own command: its pid, its process
+    /// group and its session. A stop connection is not one of these — it is
+    /// rshx tidying up — so it is left out.
     pub fn processes(&self) -> Vec<Process> {
         self.read_records("procs")
             .iter()
             .filter_map(|line| {
                 let fields: Vec<&str> = line.split_whitespace().collect();
                 match fields.as_slice() {
-                    ["proc", pid, pgid, sid] => Some(Process {
+                    ["proc", pid, pgid, sid, "command"] => Some(Process {
                         pid: pid.parse().ok()?,
                         pgid: pgid.parse().ok()?,
                         sid: sid.parse().ok()?,
@@ -376,18 +436,6 @@ impl Harness {
         (peak.max(0) as usize, running.max(0) as usize)
     }
 
-    fn records(&self, file: &str, separator: char) -> Vec<Vec<String>> {
-        self.read_records(file)
-            .iter()
-            .map(|line| {
-                line.split(separator)
-                    .filter(|field| !field.is_empty())
-                    .map(str::to_string)
-                    .collect()
-            })
-            .collect()
-    }
-
     fn read_records(&self, file: &str) -> Vec<String> {
         fs::read_to_string(self.dir.join(file))
             .unwrap_or_default()
@@ -401,6 +449,17 @@ impl Drop for Harness {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.dir);
     }
+}
+
+/// The command inside the wrapper rshx puts around one, from the one word ssh
+/// was handed. `None` for a word that is not a wrapped command — a stop
+/// connection's marker path, say.
+fn unwrap_command(wrapped: &str) -> Option<String> {
+    let script = wrapped.strip_prefix("sh -c '")?.strip_suffix('\'')?;
+    let script = script.replace(r"'\''", "'");
+    let start = script.find("( ")? + 2;
+    let end = script.rfind(" ); rc=$?")?;
+    (start <= end).then(|| script[start..end].to_string())
 }
 
 /// Runs `body` with a harness, and fails with the recorded invocations attached
@@ -838,14 +897,23 @@ const STUB: &str = r#"#!/bin/sh
 # Fake ssh for rshx's integration tests. See tests/support/mod.rs.
 dir="$RSHX_STUB_DIR"
 
-# The argv of this invocation: one line, fields separated by US (0x1f).
-# Built as one string and written once. A printf per field would be a write
-# per field, and concurrent invocations would then interleave inside a record:
-# each write appends atomically, but the record as a whole would not be.
+# The argv of this invocation: one record, fields separated by US (0x1f) and
+# the record terminated by RS (0x1e). Built as one string and written once. A
+# printf per field would be a write per field, and concurrent invocations would
+# then interleave inside a record: each write appends atomically, but the
+# record as a whole would not be. RS rather than a newline terminates it,
+# because an argument may hold a newline of its own.
 us=$(printf '\037')
+rs=$(printf '\036')
 line=
 for arg in "$@"; do line="$line$arg$us"; done
-printf '%s\n' "$line" >> "$dir/argv"
+printf '%s%s' "$line" "$rs" >> "$dir/argv"
+
+# Whether this is a stop connection: rshx makes one only to stop a Host's
+# command, and always with `BatchMode=yes`, which no other invocation carries.
+# Read before the loop below consumes the options.
+kind=command
+case " $* " in *" BatchMode=yes "*) kind=stop ;; esac
 
 # The destination is the first argument after `--`, as ssh itself parses it.
 while [ "$#" -gt 0 ]; do
@@ -856,6 +924,13 @@ dest="${1:-}"
 
 resp="$dir/resp/$dest"
 [ -d "$resp" ] || resp="$dir/resp/default"
+
+# A stop connection is scripted separately, so a run's ordinary response is
+# never replayed for it. Unscripted, it succeeds at once: most tests care only
+# that the stop was made, not what it answered.
+if [ "$kind" = "stop" ]; then
+    if [ -d "$resp/stop" ]; then resp="$resp/stop"; else resp="$dir/resp/stop"; fi
+fi
 
 # A destination may script one response per invocation, for the commands rshx
 # sends it twice: `resp/<dest>/seq/<n>` answers the n-th, and the last answers
@@ -888,23 +963,18 @@ fi
 # unlike a wall-clock bound, it does not bend when the machine is loaded.
 printf 'start %s %s\n' "$(date +%s%N)" "$dest" >> "$dir/timeline"
 # The pid, its process group and its session, so a test can tell whether rshx
-# gave the child a group of its own.
-printf 'proc %s %s %s\n' "$$" "$(ps -o pgid= -p $$ | tr -d ' ')" "$(ps -o sid= -p $$ | tr -d ' ')" >> "$dir/procs"
+# gave the child a group of its own; and whether this is a stop connection,
+# which is rshx tidying up rather than a Host's own command.
+printf 'proc %s %s %s %s\n' "$$" "$(ps -o pgid= -p $$ | tr -d ' ')" "$(ps -o sid= -p $$ | tr -d ' ')" "$kind" >> "$dir/procs"
 
 # When the response asks for one, do what `sudo -S` does: print the prompt rshx
 # set with `-p` to stderr, read the password from stdin, and retry a few times
-# before giving up. The prompt comes from rshx's own argument, so a run that
-# failed to set one prompts nothing and this reads nothing.
+# before giving up. The prompt comes from rshx's own command, so a run that
+# failed to set one prompts nothing and this reads nothing. rshx hands a
+# command over as one word, so the `-p` is read out of that word's text, as the
+# `sudo` inside it would read it.
 if [ -f "$resp/prompt" ]; then
-    prompt=
-    prev=
-    for arg in "$@"; do
-        if [ "$prev" = "-p" ]; then prompt="$arg"; break; fi
-        case "$arg" in
-            -p?*) prompt=${arg#-p}; break ;;
-        esac
-        prev="$arg"
-    done
+    prompt=$(printf '%s' " $* " | sed -n 's/.* -p \([^ ]*\) .*/\1/p')
     want=$(cat "$resp/password" 2>/dev/null) || want=
     tries=0
     matched=

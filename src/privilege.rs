@@ -235,6 +235,21 @@ impl Privilege {
         self.clock.clone()
     }
 
+    /// The password this Host's command was given, if it has one.
+    ///
+    /// Asked when a Host rshx cut short has to be stopped: a command under
+    /// `sudo` belongs to root, and a stop must not prompt for a password the
+    /// run already has. The password is the one the Host itself would be given
+    /// — its own, for a Host marked `unique_privilege_pass` — and `None` when
+    /// the run has none, or when this Host's sudo has not been answered yet.
+    pub fn password_for(&self, host: &str, unique: bool) -> Option<Vec<u8>> {
+        if unique {
+            lock(&self.unique).get(host)?.password.clone()
+        } else {
+            lock(&self.shared).password.clone()
+        }
+    }
+
     /// A password this Host has not been given yet, if the run has one.
     fn untried(&self, host: &str, unique: bool) -> Option<Vec<u8>> {
         if unique {

@@ -6,8 +6,9 @@ use crate::{
     cli::CliOptions,
     host::Host,
     interrupt::Interrupt,
+    remote,
     report::Reporter,
-    run::{Outcome, Prompts, construct_ssh_basic_cmd, execute_on_hosts, run_remote_command},
+    run::{Outcome, Prompts, execute_on_hosts, run_remote_command},
 };
 
 pub(super) async fn execute_command(
@@ -38,8 +39,11 @@ async fn run_command_on_host(
     prompts: Option<Prompts>,
     interrupt: &Interrupt,
 ) -> Outcome {
-    let mut child = construct_ssh_basic_cmd(host);
-    child.args(command);
+    // The command is run under a marker, so that a Host cut short can be asked
+    // to stop it: killing its ssh leaves the command running on the Host.
+    let marker = remote::marker(&host.name);
+    let mut child = remote::ssh(host, &[]);
+    child.arg(remote::marked(&marker, command));
     // Without `--privilege`, stdin is null so ssh cannot stop to prompt with
     // nobody there to answer; with it, stdin carries the password to sudo.
     child.stdin(if prompts.is_some() {
@@ -49,5 +53,5 @@ async fn run_command_on_host(
     });
     child.stdout(Stdio::piped()).stderr(Stdio::piped());
 
-    run_remote_command(child, host, interrupt, limit, prompts).await
+    run_remote_command(child, host, interrupt, limit, prompts, Some(&marker)).await
 }

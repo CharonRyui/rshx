@@ -77,14 +77,10 @@ fn forwards_the_command_verbatim_including_hyphen_arguments() {
 
         let invocations = harness.invocations();
         assert_eq!(invocations.len(), 3);
-        let for_node01 = invocations
-            .iter()
-            .find(|argv| argv.get(1).map(String::as_str) == Some("node01"))
-            .expect("node01 was invoked");
         assert_eq!(
-            for_node01,
-            &vec!["--", "node01", "uptime", "-p", "--since", "1 day ago"],
-            "the command reaches ssh as its own arguments, never joined into a string"
+            harness.command_for("node01"),
+            "uptime -p --since 1 day ago",
+            "the command reaches the Host as it was written, never split by rshx"
         );
         assert_eq!(
             invocations

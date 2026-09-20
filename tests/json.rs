@@ -58,6 +58,10 @@ fn an_object_carries_every_documented_field() {
         assert_eq!(object["stdout"], "node01\n");
         assert_eq!(object["stderr"], "a warning\n");
         assert_eq!(object["truncated"], false);
+        assert_eq!(
+            object["remote_stopped"], false,
+            "an ok Host was never cut short, so nothing was stopped: {object}"
+        );
         assert!(
             object["duration_ms"].is_u64(),
             "duration is a number of milliseconds: {object}"
@@ -101,6 +105,53 @@ fn exit_code_is_absent_for_a_host_rshx_killed() {
             objects[0].get("exit_code").is_none(),
             "rshx ended the child, so there is no exit code: {}",
             objects[0]
+        );
+    });
+}
+
+#[test]
+fn a_host_rshx_stopped_says_so_in_json() {
+    with_harness(|harness| {
+        harness.respond_default(Response::ok().delay_ms(30_000));
+        let file = harness.write("hosts.toml", ONE);
+
+        let out = run(rshx(
+            harness,
+            &file,
+            &["--timeout", "1s", "run", "--", "sleep 30"],
+        ));
+
+        assert_eq!(out.code, 4, "{}", out.stderr);
+        let object = &objects(&out.stdout)[0];
+        assert_eq!(object["status"], "timeout", "{object}");
+        assert_eq!(
+            object["remote_stopped"], true,
+            "rshx stopped the command it gave up on, and says so: {object}"
+        );
+    });
+}
+
+#[test]
+fn a_host_rshx_could_not_stop_does_not_claim_it_was_stopped() {
+    with_harness(|harness| {
+        harness.respond_default(Response::ok().delay_ms(30_000));
+        harness.respond(
+            "stop",
+            Response::failed(255)
+                .stderr("ssh: connect to host node01 port 22: Connection refused\n"),
+        );
+        let file = harness.write("hosts.toml", ONE);
+
+        let out = run(rshx(
+            harness,
+            &file,
+            &["--timeout", "1s", "run", "--", "sleep 30"],
+        ));
+
+        let object = &objects(&out.stdout)[0];
+        assert_eq!(
+            object["remote_stopped"], false,
+            "a stop that did not happen is not claimed: {object}"
         );
     });
 }

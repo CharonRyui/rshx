@@ -258,7 +258,7 @@ fn a_timed_out_child_is_terminated_rather_than_left_running() {
 }
 
 #[test]
-fn the_report_says_a_timed_out_remote_command_may_still_be_running() {
+fn a_timed_out_host_is_stopped_on_the_host_itself() {
     with_harness(|harness| {
         harness.respond_default(Response::ok().delay_ms(30_000));
         let file = harness.write("hosts.toml", THREE);
@@ -269,9 +269,49 @@ fn the_report_says_a_timed_out_remote_command_may_still_be_running() {
             &["--timeout", "1s", "run", "--", "sleep 30"],
         ));
 
+        assert_eq!(out.code, 4, "{}", out.stderr);
+        assert_eq!(
+            harness.stops().len(),
+            3,
+            "a Host rshx gave up on has its command stopped there: {:?}",
+            harness.stops()
+        );
         assert!(
-            out.stderr.contains("stopped waiting"),
-            "the report does not claim the remote work stopped: {}",
+            !out.stderr.contains("may still be running"),
+            "the commands were stopped, so the report does not hedge: {}",
+            out.stderr
+        );
+    });
+}
+
+#[test]
+fn a_timed_out_host_rshx_cannot_stop_says_so() {
+    with_harness(|harness| {
+        harness.respond_default(Response::ok().delay_ms(30_000));
+        // The second connection is refused, so the command outlives the run.
+        harness.respond(
+            "stop",
+            Response::failed(255)
+                .stderr("ssh: connect to host node01 port 22: Connection refused\n"),
+        );
+        let file = harness.write("hosts.toml", THREE);
+
+        let out = run(rshx(
+            harness,
+            &file,
+            &["--timeout", "1s", "run", "--", "sleep 30"],
+        ));
+
+        assert_eq!(out.code, 4, "{}", out.stderr);
+        assert!(
+            out.stdout
+                .contains("rshx: could not stop the remote command:"),
+            "what rshx could not finish is said plainly: {}",
+            out.stdout
+        );
+        assert!(
+            out.stderr.contains("may still be running"),
+            "and a command that may still be there is owned up to: {}",
             out.stderr
         );
     });

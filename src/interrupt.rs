@@ -2,8 +2,9 @@
 //!
 //! The first interrupt stops dispatching, `SIGTERM`s the ssh children in
 //! flight, then `SIGKILL`s them after a grace period a second interrupt skips.
-//! Killing the local ssh does not stop the remote command, so a Host cut short
-//! is `cancelled`, never `failed`.
+//! Killing the local ssh does not stop the remote command, so the Host is asked
+//! to stop its own, on a second connection; the Host is `cancelled` either way,
+//! never `failed`, since rshx stopped waiting rather than the command failing.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, MutexGuard};

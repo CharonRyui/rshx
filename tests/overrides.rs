@@ -74,9 +74,9 @@ fn an_entry_with_only_a_name_adds_no_options() {
             "a bare name leaves connection configuration to ~/.ssh/config"
         );
         assert_eq!(
-            harness.invocations()[0],
-            vec!["--", "node01", "hostname"],
-            "no stray arguments"
+            harness.commands(),
+            vec![("node01".to_string(), "hostname".to_string())],
+            "and the command is the only thing left to run"
         );
     });
 }

@@ -11,11 +11,9 @@ use crate::{
     cli::CliOptions,
     host::Host,
     interrupt::Interrupt,
-    privilege,
+    privilege, remote,
     report::Reporter,
-    run::{
-        Outcome, Prompts, Status, construct_ssh_basic_cmd, execute_on_hosts, run_remote_command,
-    },
+    run::{Outcome, Prompts, Status, execute_on_hosts, run_remote_command},
 };
 
 /// Runs a local script on every selected Host.
@@ -108,8 +106,9 @@ async fn copy_to_host(
             );
         }
     };
-    let mut child = construct_ssh_basic_cmd(host);
-    child.arg(COPY);
+    let marker = remote::marker(&host.name);
+    let mut child = remote::ssh(host, &[]);
+    child.arg(remote::marked(&marker, &[COPY.to_string()]));
     // The script is ssh's stdin, which carries it to the Host's `cat`. Nothing
     // on this side elevates, so no password is asked for here.
     child
@@ -117,7 +116,7 @@ async fn copy_to_host(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
-    run_remote_command(child, host, interrupt, limit, None).await
+    run_remote_command(child, host, interrupt, limit, None, Some(&marker)).await
 }
 
 /// The command a Host runs: the copied script made executable, run, and
@@ -154,8 +153,13 @@ async fn run_on_host(
     interrupt: &Interrupt,
     prompts: Option<Prompts>,
 ) -> Outcome {
-    let mut child = construct_ssh_basic_cmd(host);
-    child.args(run_argv(path, privilege));
+    // The script runs under a marker, so that a Host cut short can be asked to
+    // stop it: killing its ssh leaves the script running on the Host. The
+    // cleanup that removes the file is part of the marked command, so a stop
+    // that kills the script leaves nothing behind either.
+    let marker = remote::marker(&host.name);
+    let mut child = remote::ssh(host, &[]);
+    child.arg(remote::marked(&marker, &run_argv(path, privilege)));
     // Without `--privilege`, stdin is null so ssh cannot stop to prompt with
     // nobody there to answer; with it, stdin carries the password to sudo.
     child.stdin(if prompts.is_some() {
@@ -165,7 +169,7 @@ async fn run_on_host(
     });
     child.stdout(Stdio::piped()).stderr(Stdio::piped());
 
-    run_remote_command(child, host, interrupt, limit, prompts).await
+    run_remote_command(child, host, interrupt, limit, prompts, Some(&marker)).await
 }
 
 /// The path a Host printed, if that is what it printed. The last line is the
