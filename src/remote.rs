@@ -290,7 +290,6 @@ exit 0
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::process::ExitStatusExt;
     use std::path::{Path, PathBuf};
     use std::process::Command as Std;
 
@@ -551,8 +550,21 @@ mod tests {
         // marker names is a shell with a child of its own, which is the shape
         // a stop has to walk.
         let line = marked(&marker, &words(&["sh", "-c", "'sleep 300; sleep 300'"]));
-        let mut running = shell(&line).spawn().expect("start the marked command");
+        // `exec`, so that the process this test waits on is the one the marker
+        // names. `marked`'s line is itself `sh -c` and a script, which sshd
+        // hands to the Host's login shell, so a shell started here would run a
+        // second one and the status read back would be that shell's, not the
+        // recorded one's.
+        let mut running = shell(&format!("exec {line}"))
+            .spawn()
+            .expect("start the marked command");
         let root = recorded_pid(&marker);
+        assert_eq!(
+            running.id(),
+            root as u32,
+            "the marked command is the process the marker names, so its status \
+             is the recorded shell's"
+        );
         let tree = descendants(root);
         assert!(
             tree.len() >= 3,
@@ -566,10 +578,19 @@ mod tests {
             !Path::new(&marker).exists(),
             "the stop removes the marker it read"
         );
-        let status = running.wait().expect("the marked command ends");
+        // The command's own work is two `sleep 300`s, so a recorded shell the
+        // stop missed would still be running when the deadline passed. What is
+        // asserted is that the command was ended, and how the shell reports the
+        // kill is left to the shell: dash exits 128 + 15 where bash dies by the
+        // signal, and which one arrives depends on where the shell was when the
+        // signal landed. Pinning either would be pinning the shell, not rshx.
+        wait_until("the stop to end the recorded shell", || {
+            running.try_wait().expect("ask whether it ended").is_some()
+        });
+        let status = running.wait().expect("the marked command's status");
         assert!(
-            status.signal().is_some(),
-            "the recorded shell was signalled, not left running: {status:?}"
+            !status.success(),
+            "the recorded shell was stopped, not left to finish: {status:?}"
         );
         for pid in &tree[1..] {
             assert!(gone(*pid), "pid {pid} outlived the stop");
