@@ -13,13 +13,14 @@ use crate::{
     interrupt::Interrupt,
     privilege, remote,
     report::Reporter,
-    run::{Outcome, Prompts, Status, execute_on_hosts, run_remote_command},
+    run::{Outcome, Prompts, Status, execute_on_hosts, exit_code, launched, run_remote_command},
 };
 
 /// Runs a local script on every selected Host.
 pub(super) async fn execute_local_script(
     selected: &Vec<&Host>,
     script: &Path,
+    detach: bool,
     options: &CliOptions,
     reporter: &mut Reporter,
 ) -> Result<u8> {
@@ -46,8 +47,9 @@ pub(super) async fn execute_local_script(
         options,
         reporter,
         async |host, interrupt, prompts| {
-            run_script(host, script, options, interrupt, prompts).await
+            run_script(host, script, detach, options, interrupt, prompts).await
         },
+        exit_code,
     )
     .await
 }
@@ -56,12 +58,23 @@ pub(super) async fn execute_local_script(
 async fn run_script(
     host: &Host,
     script: &Path,
+    detach: bool,
     options: &CliOptions,
     interrupt: &Interrupt,
     prompts: Option<Prompts>,
 ) -> Outcome {
     let started = Instant::now();
-    let copied = copy_to_host(host, script, options.timeout, interrupt).await;
+    // The copy is a command of rshx's own, not the run's: it is a copy, and
+    // keeps no record of itself. It runs under the run's marker, though, so a
+    // stop still finds whatever the copy left behind.
+    let copied = copy_to_host(
+        host,
+        script,
+        options.timeout,
+        interrupt,
+        &remote::marker(&host.name),
+    )
+    .await;
     if copied.status != Status::Ok {
         return copied;
     }
@@ -75,7 +88,7 @@ async fn run_script(
     let limit = options
         .timeout
         .map(|limit| limit.saturating_sub(started.elapsed()));
-    run_on_host(host, &path, options.privilege, limit, interrupt, prompts).await
+    run_on_host(host, &path, detach, limit, interrupt, prompts).await
 }
 
 /// The remote side of the copy: a temporary file, the script written into it,
@@ -92,6 +105,7 @@ async fn copy_to_host(
     script: &Path,
     limit: Option<Duration>,
     interrupt: &Interrupt,
+    marker: &str,
 ) -> Outcome {
     let started = Instant::now();
     let file = match File::open(script) {
@@ -106,9 +120,8 @@ async fn copy_to_host(
             );
         }
     };
-    let marker = remote::marker(&host.name);
     let mut child = remote::ssh(host, &[]);
-    child.arg(remote::marked(&marker, &[COPY.to_string()]));
+    child.arg(remote::marked(marker, &[COPY.to_string()]));
     // The script is ssh's stdin, which carries it to the Host's `cat`. Nothing
     // on this side elevates, so no password is asked for here.
     child
@@ -116,7 +129,7 @@ async fn copy_to_host(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
-    run_remote_command(child, host, interrupt, limit, None, Some(&marker)).await
+    run_remote_command(child, host, interrupt, limit, None, Some(marker)).await
 }
 
 /// The command a Host runs: the copied script made executable, run, and
@@ -143,23 +156,41 @@ fn run_argv(path: &str, privilege: bool) -> Vec<String> {
     command
 }
 
+/// What a detached launch runs in the payload: the copied script made
+/// executable, run, and removed whatever it exits with. Unlike `run_argv` this
+/// is shell source rather than words, because the payload is already one word
+/// inside the launcher, and the removal is the payload's own: the launch
+/// returned long before the script ends, so only the script's own end can
+/// remove the file it was copied to.
+fn detached_text(path: &str) -> String {
+    format!(r#"chmod +x -- "{path}" && "{path}"; rc=$?; rm -f -- "{path}"; exit $rc"#)
+}
+
 /// Runs the copied script on one Host, as the Host's user or, under
-/// `--privilege`, as root.
+/// `--privilege`, as root — waiting for it, or leaving it running.
 async fn run_on_host(
     host: &Host,
     path: &str,
-    privilege: bool,
+    detach: bool,
     limit: Option<Duration>,
     interrupt: &Interrupt,
     prompts: Option<Prompts>,
 ) -> Outcome {
-    // The script runs under a marker, so that a Host cut short can be asked to
-    // stop it: killing its ssh leaves the script running on the Host. The
-    // cleanup that removes the file is part of the marked command, so a stop
-    // that kills the script leaves nothing behind either.
     let marker = remote::marker(&host.name);
     let mut child = remote::ssh(host, &[]);
-    child.arg(remote::marked(&marker, &run_argv(path, privilege)));
+    // The script runs under a marker, so that a Host cut short can be asked to
+    // stop it: killing its ssh leaves the script running on the Host. The
+    // cleanup that removes the file is part of the marked command, so a script
+    // that ends — however it ends — takes its copy with it; a stop that kills
+    // the shell before that line runs leaves the copy behind, which is the one
+    // thing a stopped script leaves on the Host.
+    child.arg(match detach {
+        // The launcher starts the script and returns: the elevation, when
+        // there is one, is the launcher's, and what the script prints goes
+        // nowhere.
+        true => remote::detached(&marker, &detached_text(path), prompts.is_some()),
+        false => remote::marked(&marker, &run_argv(path, prompts.is_some())),
+    });
     // Without `--privilege`, stdin is null so ssh cannot stop to prompt with
     // nobody there to answer; with it, stdin carries the password to sudo.
     child.stdin(if prompts.is_some() {
@@ -169,7 +200,11 @@ async fn run_on_host(
     });
     child.stdout(Stdio::piped()).stderr(Stdio::piped());
 
-    run_remote_command(child, host, interrupt, limit, prompts, Some(&marker)).await
+    let outcome = run_remote_command(child, host, interrupt, limit, prompts, Some(&marker)).await;
+    match detach {
+        true => launched(outcome),
+        false => outcome,
+    }
 }
 
 /// The path a Host printed, if that is what it printed. The last line is the

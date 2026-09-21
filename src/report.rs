@@ -164,6 +164,7 @@ impl Reporter {
             exit_code: outcome.exit_code,
             cause: outcome.cause.map(Cause::as_str),
             duration_ms: outcome.duration.as_millis() as u64,
+            pid: outcome.pid,
             // Lossy: a stream is remote bytes, and the alternative is failing
             // the whole run on one stray byte.
             stdout: String::from_utf8_lossy(&outcome.stdout),
@@ -245,6 +246,15 @@ impl Reporter {
             outcome.duration.as_secs_f64(),
             s.dim.render_reset()
         ));
+        // The pid of the shell running the command, when rshx knows it: a
+        // detached run is told it, and it is the Host's own number.
+        if let Some(pid) = outcome.pid {
+            line.push_str(&format!(
+                " {}pid {pid}{}",
+                s.dim.render(),
+                s.dim.render_reset()
+            ));
+        }
         if let Some(cause) = outcome.cause {
             line.push_str(&format!(
                 " {}({}){}",
@@ -344,6 +354,7 @@ const STATUS_WIDTH: usize = 11; // "unreachable"
 struct Styles {
     ok: Style,
     failed: Style,
+    running: Style,
     unreachable: Style,
     timeout: Style,
     cancelled: Style,
@@ -367,6 +378,7 @@ impl Styles {
         Styles {
             ok: AnsiColor::Green.on_default().bold(),
             failed: AnsiColor::Red.on_default().bold(),
+            running: AnsiColor::Cyan.on_default().bold(),
             unreachable: AnsiColor::Yellow.on_default().bold(),
             timeout: AnsiColor::Magenta.on_default().bold(),
             cancelled: AnsiColor::BrightBlack.on_default(),
@@ -383,6 +395,9 @@ impl Styles {
         match status {
             Status::Ok => self.ok,
             Status::Failed => self.failed,
+            // A command still going is neither good nor bad news: it is the
+            // answer rshx was asked for, and the one a reader looks for first.
+            Status::Running => self.running,
             Status::Unreachable => self.unreachable,
             Status::Timeout => self.timeout,
             Status::Cancelled => self.cancelled,
@@ -403,6 +418,9 @@ struct JsonLine<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     cause: Option<&'a str>,
     duration_ms: u64,
+    /// The pid of the shell running the Host's command, when rshx knows it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pid: Option<u32>,
     stdout: std::borrow::Cow<'a, str>,
     stderr: std::borrow::Cow<'a, str>,
     /// Whether either stream lost bytes to rshx's cap.

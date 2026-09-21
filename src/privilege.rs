@@ -37,6 +37,30 @@ pub fn under_sudo(command: &[String]) -> Vec<String> {
     rewritten
 }
 
+/// The command as it is run by a connection that cannot be answered, which is
+/// every connection rshx makes on a run's behalf after the run itself.
+///
+/// `password` is whether the run's password is still in hand. With it, `-S` and
+/// an empty prompt: sudo reads the password off stdin if it asks, and prints its
+/// own wording if it fails, since nothing on this connection watches for rshx's
+/// marker. Without it, `-n`, which succeeds exactly when the Host's sudo wants
+/// no password — the only honest answer when rshx has none to give.
+///
+/// `--` ends sudo's own options either way: what follows is one shell word rshx
+/// wrote, and a word that begins with `-` is not sudo's to read as an option.
+pub fn under_sudo_unprompted(command: &[String], password: bool) -> Vec<String> {
+    let mut rewritten = Vec::with_capacity(command.len() + 5);
+    rewritten.push("sudo".to_string());
+    if password {
+        rewritten.extend(["-S", "-p", ""].map(String::from));
+    } else {
+        rewritten.push("-n".to_string());
+    }
+    rewritten.push("--".to_string());
+    rewritten.extend_from_slice(command);
+    rewritten
+}
+
 /// Whether the command already runs sudo itself. Only ever a warning: the
 /// wrapper is the same either way.
 pub fn runs_sudo(command: &[String]) -> bool {
@@ -531,7 +555,7 @@ impl Drop for Raw {
 
 #[cfg(test)]
 mod tests {
-    use super::{Filtered, MARKER, MarkerFilter, runs_sudo, under_sudo};
+    use super::{Filtered, MARKER, MarkerFilter, runs_sudo, under_sudo, under_sudo_unprompted};
 
     fn argv(words: &[&str]) -> Vec<String> {
         words.iter().map(|word| word.to_string()).collect()
@@ -551,6 +575,31 @@ mod tests {
                 "kubelet"
             ])
         );
+    }
+
+    #[test]
+    fn a_connection_with_no_one_to_answer_gets_a_sudo_that_never_asks() {
+        let script = argv(&["sh", "-c", "'m=$0; exit 0'", "/tmp/rshx-1-h.pid"]);
+        // With the password in hand, sudo is told to read it off stdin and to
+        // word its own failures, since nothing here watches for the marker.
+        assert_eq!(
+            under_sudo_unprompted(&script, true),
+            [argv(&["sudo", "-S", "-p", "", "--"]), script.clone()].concat()
+        );
+        // With none, only a sudo that wants none may run it.
+        assert_eq!(
+            under_sudo_unprompted(&script, false),
+            [argv(&["sudo", "-n", "--"]), script.clone()].concat()
+        );
+        // Either way `--`, so the script — one word rshx wrote — is never read
+        // as an option of sudo's.
+        for argv in [
+            under_sudo_unprompted(&argv(&["-not-an-option"]), true),
+            under_sudo_unprompted(&argv(&["-not-an-option"]), false),
+        ] {
+            let end = argv.iter().position(|word| word == "--").expect("`--`");
+            assert_eq!(argv[end + 1], "-not-an-option");
+        }
     }
 
     #[test]

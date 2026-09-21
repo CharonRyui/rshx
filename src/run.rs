@@ -31,6 +31,10 @@ mod script;
 pub enum Status {
     Ok,
     Failed,
+    /// The command was started and left running on the Host. Only a detached
+    /// run reports it: every other run waits for its command, and a Host rshx
+    /// cut short is `cancelled`.
+    Running,
     Unreachable,
     Timeout,
     Cancelled,
@@ -38,9 +42,10 @@ pub enum Status {
 
 impl Status {
     /// Every status, in the order the summary lists them.
-    pub const ALL: [Status; 5] = [
+    pub const ALL: [Status; 6] = [
         Status::Ok,
         Status::Failed,
+        Status::Running,
         Status::Unreachable,
         Status::Timeout,
         Status::Cancelled,
@@ -50,6 +55,7 @@ impl Status {
         match self {
             Status::Ok => "ok",
             Status::Failed => "failed",
+            Status::Running => "running",
             Status::Unreachable => "unreachable",
             Status::Timeout => "timeout",
             Status::Cancelled => "cancelled",
@@ -57,6 +63,7 @@ impl Status {
     }
 
     /// Whether rshx stopped waiting for this Host, not how its command ended.
+    /// A `running` Host is not one rshx gave up on: rshx left it to run.
     pub fn is_unfinished(self) -> bool {
         matches!(self, Status::Timeout | Status::Cancelled)
     }
@@ -91,6 +98,9 @@ pub struct Outcome {
     /// so rather than claiming work that was not done.
     pub remote_stopped: bool,
     pub duration: Duration,
+    /// The pid of the shell running the Host's command, when rshx knows it:
+    /// a detached launch is told it, and nothing else is.
+    pub pid: Option<u32>,
 }
 
 impl Outcome {
@@ -110,8 +120,46 @@ impl Outcome {
             // Nothing ran remotely, so there is nothing to have stopped.
             remote_stopped: false,
             duration,
+            pid: None,
         }
     }
+}
+
+/// The outcome of a detached launch: ssh's status stands, and what the launcher
+/// printed is the pid of the shell running the command — the same shell the
+/// marker names, so a stop of a Host cut short reaches what was started here.
+///
+/// The pid is plumbing, not the Host's output: it is taken out of the stdout
+/// the report would otherwise show. A launch that printed no pid started
+/// nothing rshx can name, which is what `unreachable` says — the Host never got
+/// as far as rshx asked.
+pub fn launched(mut outcome: Outcome) -> Outcome {
+    if outcome.status != Status::Ok {
+        return outcome;
+    }
+    let text = String::from_utf8_lossy(&outcome.stdout);
+    let pid = text
+        .lines()
+        .rfind(|line| !line.is_empty())
+        .and_then(|line| line.trim().parse::<u32>().ok());
+    match pid {
+        Some(pid) => {
+            outcome.status = Status::Running;
+            outcome.pid = Some(pid);
+            outcome.stdout.clear();
+            // The status ssh ended with is the launcher's, not the command's:
+            // the command has not ended, so it has none to report.
+            outcome.exit_code = None;
+        }
+        None => {
+            let mut stderr =
+                b"rshx: the Host printed no pid, so the command was not started\n".to_vec();
+            stderr.extend_from_slice(&outcome.stderr);
+            outcome.status = Status::Unreachable;
+            outcome.stderr = stderr;
+        }
+    }
+    outcome
 }
 
 /// Loads the host file, then answers the subcommand the command line asked for.
@@ -127,11 +175,19 @@ pub async fn execute(cli: &Cli) -> Result<u8> {
         CliCommand::List => list::execute(&selected, options),
 
         CliCommand::Run(args) => {
+            let detach = args.detach;
             let mut reporter = reporter(options);
 
             // A script is copied to each Host and run there.
             if let Some(script_path) = &args.script {
-                return execute_local_script(&selected, script_path, options, &mut reporter).await;
+                return execute_local_script(
+                    &selected,
+                    script_path,
+                    detach,
+                    options,
+                    &mut reporter,
+                )
+                .await;
             }
 
             // A command is handed to each Host's own ssh to run.
@@ -139,7 +195,13 @@ pub async fn execute(cli: &Cli) -> Result<u8> {
                 // A command that runs sudo itself gets rshx's sudo in front of it and
                 // elevates a second time: rshx reads none of the command's own options —
                 // that would mean knowing sudo's grammar — so it warns rather than guesses.
-                privilege::under_sudo(&args.command)
+                // A detached run is the exception: its launcher carries the elevation,
+                // so the command inside is the command as it was typed.
+                if detach {
+                    args.command.clone()
+                } else {
+                    privilege::under_sudo(&args.command)
+                }
             } else {
                 args.command.clone()
             };
@@ -155,15 +217,17 @@ pub async fn execute(cli: &Cli) -> Result<u8> {
                 );
             }
 
-            execute_command(&selected, &command, options, &mut reporter).await
+            execute_command(&selected, &command, detach, options, &mut reporter).await
         }
 
         CliCommand::Ping => {
             let mut reporter = reporter(options);
-
+            // A ping is a run like any other: it names its command on the Host
+            // too, so a Host cut short is stopped the same way.
             execute_command(
                 &selected,
                 &["echo".to_string(), "pong".to_string()],
+                false,
                 options,
                 &mut reporter,
             )
@@ -223,28 +287,39 @@ struct Ask {
     stdin: tokio::process::ChildStdin,
 }
 
+/// Asks the run for one Host's password, and answers it. The ask goes to the
+/// main task, which owns the terminal and the heartbeat: one prompt for the
+/// run, whoever needs it and whatever they need it for.
+///
+/// `None` means the run cannot answer — nowhere to ask, or nothing typed —
+/// which is already recorded as the run's own failure.
+async fn ask_for_password(prompts: &Prompts, host: &str, unique: bool) -> Option<Vec<u8>> {
+    let (reply, answer) = tokio::sync::oneshot::channel();
+    let request = privilege::Request {
+        host: host.to_string(),
+        unique,
+        reply,
+    };
+    // Timed from here, not from when the user starts typing: the Host is
+    // blocked on rshx until its answer comes back. Marked before the ask goes
+    // out, so one queued behind another Host's prompt still counts.
+    let waiting = prompts.clock.asking_now(host);
+    if prompts.requests.send(request).is_err() {
+        return None;
+    }
+    let password = answer.await.ok().flatten();
+    // Whatever the password is written to is the Host's own time again.
+    drop(waiting);
+    password
+}
+
 impl Ask {
     /// Asks the run for this Host's password, and writes it to the Host.
     /// Answers whether the run can still answer; asking again never returns.
     async fn answer(&mut self) -> bool {
-        let (reply, answer) = tokio::sync::oneshot::channel();
-        let request = privilege::Request {
-            host: self.host.clone(),
-            unique: self.unique,
-            reply,
-        };
-        // Timed from here, not from when the user starts typing: the Host is
-        // blocked on rshx until its answer comes back. Marked before the ask
-        // goes out, so one queued behind another Host's prompt still counts.
-        let waiting = self.prompts.clock.asking_now(&self.host);
-        if self.prompts.requests.send(request).is_err() {
-            return false;
-        }
-        let Ok(Some(password)) = answer.await else {
+        let Some(password) = ask_for_password(&self.prompts, &self.host, self.unique).await else {
             return false;
         };
-        // The writing is the Host's own time again.
-        drop(waiting);
         // The password is written to the Host's ssh, which forwards it to the
         // remote sudo reading its stdin. A newline ends it: sudo reads a line.
         self.stdin.write_all(&password).await.is_ok()
@@ -332,144 +407,209 @@ pub fn exit_code(outcomes: &[Outcome]) -> u8 {
         match outcome.status {
             Status::Failed => code |= EXIT_FAILED,
             Status::Unreachable | Status::Timeout => code |= EXIT_UNREACHABLE,
-            Status::Ok | Status::Cancelled => {}
+            // A detached run's Hosts are `running` when rshx hands them over,
+            // which is exactly what was asked for.
+            Status::Ok | Status::Running | Status::Cancelled => {}
         }
     }
     code
 }
 
-async fn run_remote_command(
+/// What one Host's ssh left behind: everything rshx read from it, before
+/// anything is made of it.
+struct Settled {
+    /// The child's own end. `Err` means it is gone but its status is
+    /// unreadable.
+    waited: std::io::Result<std::process::ExitStatus>,
+    /// Whether rshx's own limit ended the child.
+    timed_out: bool,
+    /// Whether an interrupt killed it.
+    killed: bool,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+    stdout_truncated: bool,
+    stderr_truncated: bool,
+    /// How long the Host took, as rshx measured it.
+    duration: Duration,
+}
+
+impl Settled {
+    /// The child's exit status, when it exited rather than being killed.
+    fn exit_code(&self) -> Option<i32> {
+        self.waited.as_ref().ok().and_then(|status| status.code())
+    }
+}
+
+/// Runs one Host's ssh to its end — or until an interrupt or that Host's own
+/// limit ends it — and reads both of its streams. `Err` is rshx's own failure
+/// to start ssh, not a diagnosis of the remote.
+///
+/// Shared by every connection rshx makes: a run waits for its command, and the
+/// stop a Host cut short is asked for waits for the Host's answer. What the
+/// streams *mean* is the caller's, which is the whole difference between them.
+async fn settle(
     mut child: Command,
+    host: &Host,
+    interrupt: &Interrupt,
+    limit: Option<Duration>,
+    prompts: Option<Prompts>,
+) -> std::io::Result<Settled> {
+    // Its own process group, so a terminal's interrupt reaches rshx alone and
+    // rshx decides when its children die.
+    child.process_group(0);
+
+    let started = Instant::now();
+    let mut running = child.spawn()?;
+    let pid = match running.id() {
+        Some(pid) => pid as i32,
+        // A spawned child always has a pid; without one it cannot be
+        // tracked, so it is left to run rather than killed blind.
+        None => 0,
+    };
+    if pid != 0 && !interrupt.register(&host.name, pid) {
+        // The run was interrupted while this ssh was starting. It is
+        // already marked killed, so its result is `cancelled`.
+        interrupt::signal_group(pid, libc::SIGTERM);
+    }
+
+    let stdout = running.stdout.take().expect("stdout was piped");
+    let stderr = running.stderr.take().expect("stderr was piped");
+    // The Host's stdin reaches the remote sudo, so the reader that
+    // notices the prompt is the one that can answer it.
+    let ask = match (prompts.as_ref(), running.stdin.take()) {
+        (Some(prompts), Some(stdin)) => Some(Ask {
+            prompts: prompts.clone(),
+            host: host.name.clone(),
+            unique: host.unique_privilege_pass,
+            stdin,
+        }),
+        _ => None,
+    };
+    // Both streams are drained at once: read in turn, they deadlock
+    // once the child fills one. Tasks, not `join!`, so terminating
+    // the child cannot cancel a half-read stream.
+    let stdout_task = tokio::spawn(read_capped(stdout, STREAM_CAP));
+    let stderr_task = tokio::spawn(read_stderr(stderr, STREAM_CAP, ask));
+
+    // The limit bounds the child's lifetime: once it is gone its
+    // pipes close, so the reads finish and a wedged Host cannot hold
+    // the run open. Only this Host's own ask is excluded from the
+    // limit, so a slow typist does not turn it into a `timeout`.
+    let (waited, timed_out) = interrupt::wait_bounded(
+        &mut running,
+        pid,
+        limit,
+        &host.name,
+        prompts.as_ref().map(|p| &p.clock),
+    )
+    .await;
+    if pid != 0 {
+        interrupt.deregister(&host.name);
+    }
+    let (stdout, stdout_truncated) = stdout_task.await.unwrap_or_default();
+    let (stderr, stderr_truncated) = stderr_task.await.unwrap_or_default();
+
+    Ok(Settled {
+        waited,
+        timed_out,
+        // A Host rshx killed is `cancelled` whatever exit status its death
+        // produced: ssh exits 255 on SIGTERM, which would otherwise read as
+        // `unreachable`. An interrupt outranks a timeout.
+        killed: interrupt.was_killed(&host.name),
+        stdout,
+        stderr,
+        stdout_truncated,
+        stderr_truncated,
+        duration: started.elapsed(),
+    })
+}
+
+async fn run_remote_command(
+    child: Command,
     host: &Host,
     interrupt: &Interrupt,
     limit: Option<Duration>,
     prompts: Option<Prompts>,
     marker: Option<&str>,
 ) -> Outcome {
-    // Its own process group, so a terminal's interrupt reaches rshx alone and
-    // rshx decides when its children die.
-    child.process_group(0);
-
     let started = Instant::now();
-    match child.spawn() {
-        Ok(mut running) => {
-            let pid = match running.id() {
-                Some(pid) => pid as i32,
-                // A spawned child always has a pid; without one it cannot be
-                // tracked, so it is left to run rather than killed blind.
-                None => 0,
-            };
-            if pid != 0 && !interrupt.register(&host.name, pid) {
-                // The run was interrupted while this ssh was starting. It is
-                // already marked killed, so its result is `cancelled`.
-                interrupt::signal_group(pid, libc::SIGTERM);
-            }
-
-            let stdout = running.stdout.take().expect("stdout was piped");
-            let stderr = running.stderr.take().expect("stderr was piped");
-            // The Host's stdin reaches the remote sudo, so the reader that
-            // notices the prompt is the one that can answer it.
-            let ask = match (prompts.as_ref(), running.stdin.take()) {
-                (Some(prompts), Some(stdin)) => Some(Ask {
-                    prompts: prompts.clone(),
-                    host: host.name.clone(),
-                    unique: host.unique_privilege_pass,
-                    stdin,
-                }),
-                _ => None,
-            };
-            // Both streams are drained at once: read in turn, they deadlock
-            // once the child fills one. Tasks, not `join!`, so terminating
-            // the child cannot cancel a half-read stream.
-            let stdout_task = tokio::spawn(read_capped(stdout, STREAM_CAP));
-            let stderr_task = tokio::spawn(read_stderr(stderr, STREAM_CAP, ask));
-
-            // The limit bounds the child's lifetime: once it is gone its
-            // pipes close, so the reads finish and a wedged Host cannot hold
-            // the run open. Only this Host's own ask is excluded from the
-            // limit, so a slow typist does not turn it into a `timeout`.
-            let (waited, timed_out) = interrupt::wait_bounded(
-                &mut running,
-                pid,
-                limit,
-                &host.name,
-                prompts.as_ref().map(|p| &p.clock),
-            )
-            .await;
-            if pid != 0 {
-                interrupt.deregister(&host.name);
-            }
-            let (stdout, stdout_truncated) = stdout_task.await.unwrap_or_default();
-            let (stderr, stderr_truncated) = stderr_task.await.unwrap_or_default();
-
-            // A Host rshx killed is `cancelled` whatever exit status its death
-            // produced: ssh exits 255 on SIGTERM, which would otherwise read
-            // as `unreachable`. An interrupt outranks a timeout.
-            let killed = interrupt.was_killed(&host.name);
-            let exit_code = waited.as_ref().ok().and_then(|status| status.code());
-            let status = match (killed, timed_out, &waited, exit_code) {
-                (true, _, _, _) => Status::Cancelled,
-                (false, true, _, _) => Status::Timeout,
-                (false, false, Ok(_), Some(code)) => Status::from_exit_code(code),
-                // No exit status: the child died from a signal.
-                (false, false, Ok(_), None) => Status::Cancelled,
-                // The child is gone but its status is unreadable.
-                (false, false, Err(_), _) => Status::Unreachable,
-            };
-            // Computed after the status, and never allowed to change it.
-            let cause = match status {
-                Status::Failed | Status::Unreachable => Cause::infer(&stderr),
-                _ => None,
-            };
-            let mut stderr = match waited {
-                Ok(_) => stderr,
-                Err(err) => format!("rshx: could not read ssh's exit status: {err}\n").into_bytes(),
-            };
-            // The Host's own time, taken before the stop below: that is rshx
-            // tidying up after the Host, not the Host still working.
-            let duration = started.elapsed();
-            // Killing a Host's ssh does not stop what it started, so a Host
-            // rshx cut short is asked to stop its own command, by the marker
-            // written before that command ran.
-            let mut remote_stopped = false;
-            if (killed || timed_out)
-                && let Some(marker) = marker
-            {
-                let password = prompts.as_ref().and_then(|prompts| {
-                    prompts
-                        .privilege
-                        .password_for(&host.name, host.unique_privilege_pass)
-                });
-                match remote::stop(host, marker, prompts.is_some(), password.as_deref()).await {
-                    Ok(()) => remote_stopped = true,
-                    // The Host's status is settled; this says what rshx could
-                    // not finish, which its own output cannot.
-                    Err(reason) => stderr.extend_from_slice(
-                        format!("rshx: could not stop the remote command: {reason}\n").as_bytes(),
-                    ),
-                }
-            }
-            Outcome {
-                host: host.name.clone(),
-                status,
-                // Absent when rshx ended the child: its exit status says
-                // nothing about the command, which rshx stops on its own.
-                exit_code: if killed || timed_out { None } else { exit_code },
-                cause,
-                stdout,
-                stderr,
-                stdout_truncated,
-                stderr_truncated,
-                remote_stopped,
-                duration,
-            }
-        }
+    let settled = match settle(child, host, interrupt, limit, prompts.clone()).await {
+        Ok(settled) => settled,
         // rshx's own failure to spawn ssh, not a diagnosis of the remote.
-        Err(err) => Outcome::local_failure(
-            &host.name,
-            started.elapsed(),
-            format!("could not run ssh: {err}"),
-        ),
+        Err(err) => {
+            return Outcome::local_failure(
+                &host.name,
+                started.elapsed(),
+                format!("could not run ssh: {err}"),
+            );
+        }
+    };
+    let exit_code = settled.exit_code();
+    let Settled {
+        waited,
+        timed_out,
+        killed,
+        stdout,
+        stderr,
+        stdout_truncated,
+        stderr_truncated,
+        duration,
+    } = settled;
+
+    let status = match (killed, timed_out, &waited, exit_code) {
+        (true, _, _, _) => Status::Cancelled,
+        (false, true, _, _) => Status::Timeout,
+        (false, false, Ok(_), Some(code)) => Status::from_exit_code(code),
+        // No exit status: the child died from a signal.
+        (false, false, Ok(_), None) => Status::Cancelled,
+        // The child is gone but its status is unreadable.
+        (false, false, Err(_), _) => Status::Unreachable,
+    };
+    // Computed after the status, and never allowed to change it.
+    let cause = match status {
+        Status::Failed | Status::Unreachable => Cause::infer(&stderr),
+        _ => None,
+    };
+    let mut stderr = match waited {
+        Ok(_) => stderr,
+        Err(err) => format!("rshx: could not read ssh's exit status: {err}\n").into_bytes(),
+    };
+    // Killing a Host's ssh does not stop what it started, so a Host rshx cut
+    // short is asked to stop its own command, by the marker the run left on it.
+    let mut remote_stopped = false;
+    if (killed || timed_out)
+        && let Some(marker) = marker
+    {
+        let password = prompts.as_ref().and_then(|prompts| {
+            prompts
+                .privilege
+                .password_for(&host.name, host.unique_privilege_pass)
+        });
+        match remote::stop(host, marker, prompts.is_some(), password.as_deref()).await {
+            Ok(()) => remote_stopped = true,
+            // The Host's status is settled; this says what rshx could not
+            // finish, which its own output cannot.
+            Err(reason) => stderr.extend_from_slice(
+                format!("rshx: could not stop the remote command: {reason}\n").as_bytes(),
+            ),
+        }
+    }
+    Outcome {
+        host: host.name.clone(),
+        status,
+        // Absent when rshx ended the child: its exit status says nothing about
+        // the command, which rshx stops on its own.
+        exit_code: if killed || timed_out { None } else { exit_code },
+        cause,
+        stdout,
+        stderr,
+        stdout_truncated,
+        stderr_truncated,
+        remote_stopped,
+        duration,
+        // rshx waited for this command rather than leaving it to run, so no
+        // Host ever told it a pid.
+        pid: None,
     }
 }
 
@@ -497,6 +637,7 @@ async fn execute_on_hosts<F>(
     options: &CliOptions,
     reporter: &mut Reporter,
     per_host: F,
+    exit: fn(&[Outcome]) -> u8,
 ) -> Result<u8>
 where
     F: AsyncFn(&Host, &Interrupt, Option<Prompts>) -> Outcome,
@@ -600,6 +741,6 @@ where
         // A run rshx could not ask for a password is a local failure, not a
         // Host's: the Hosts it cancelled never got to fail.
         Some(_) => EXIT_LOCAL,
-        None => exit_code(&outcomes),
+        None => exit(&outcomes),
     })
 }

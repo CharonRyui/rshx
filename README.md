@@ -33,9 +33,10 @@ source: no modules, no inventory schema, no service discovery.
 each one that finishes is replaced by a pending one. 1000 hosts at the default
 fanout never means more than 32 ssh processes.
 
-**A status never depends on parsing text.** Whether a host is `ok`, `failed` or
-`unreachable` is a pure function of ssh's exit status. Text from ssh's stderr
-can add a `cause`, but it can never change a status or an exit code.
+**A status never depends on parsing a host's output.** Whether a host is `ok`,
+`failed` or `unreachable` is a pure function of ssh's exit status. Text from
+ssh's stderr can add a `cause`, but it can never change a status or an exit
+code.
 
 **A script is sent, not fetched.** `--script` writes the file to the host over
 the ssh connection rshx already has, runs it there, and removes it. Nothing is
@@ -43,7 +44,9 @@ installed, nothing is kept, and no host has to reach the machine rshx runs on.
 
 rshx is not a configuration-management tool. It runs one command or one script
 and reports what happened; there is no task model, no modules, no YAML, and no
-state between runs.
+state of its own between runs. `--detach` is the one thing that outlives the run
+that started it, and rshx does not track even that: what it starts is on its own
+from the moment rshx returns.
 
 ## Install
 
@@ -75,6 +78,7 @@ $ rshx -H hosts.toml -g ascend run -- npu-smi info
 $ rshx -H hosts.toml -f 64 --timeout 30s run -- systemctl status kubelet
 $ rshx -H hosts.toml run --script ./collect.sh
 $ rshx -H hosts.toml --json run -- hostname | jq -r '.host'
+$ rshx -H hosts.toml -g ascend run --detach -- ./bench.sh
 $ rshx -H hosts.toml ping
 $ rshx -H hosts.toml -g ascend list
 ```
@@ -347,6 +351,42 @@ that exits zero without printing where it put the file leaves nothing to run:
 that host is reported `unreachable`, with rshx's note and the host's own output,
 and the script is not run there.
 
+## Detached runs
+
+`run --detach` starts the command on every host and returns without waiting for
+it, reporting `running` with the pid of the shell running it:
+
+```console
+$ rshx -H hosts.toml -g ascend run --detach -- ./bench.sh
+hellohpc-ascend0 running 0.49s pid 1581766
+hellohpc-ascend1 running 0.51s pid 4119022
+2 hosts: 0 ok, 2 running in 0.51s
+```
+
+Nothing else is kept: no log, no record, nothing to read back later. The output
+cannot come back over the connection the command was started from — a command
+still holding that channel would keep the connection open for as long as it ran
+— so both streams go to `/dev/null`, and what rshx leaves on the host is the
+marker that names the command, which the command's own end removes:
+
+| File | What it is |
+|------|------------|
+| `/tmp/rshx-<token>-<host>.pid` | The pid of the shell running the command. Removed when the command ends. |
+
+A detached command that needs its output kept must keep it itself:
+
+```console
+$ rshx -H hosts.toml -g ascend run --detach -- sh -c './bench.sh >bench.log 2>&1'
+```
+
+The marker is what a stop finds the command by, so a launch that is cut short is
+stopped on the host the same way any other host is: `--timeout` bounds the
+launch rather than the command, and past it a host that has not answered is
+`timeout`, with nothing left running there.
+
+`--detach` works with `--script` as well: the copy is removed when the script
+ends, so nothing of rshx's is left on the host either way.
+
 ## Ping
 
 `ping` runs `echo pong` on every selected host, which is the cheapest way to
@@ -394,12 +434,12 @@ colour off under `auto`; it is a default, not an override, so an explicit
 `--color always` still colours. `--color never` is the way to be sure.
 
 Colour marks a host's **outcome**, the one thing a reader scans for: green `ok`,
-red `failed`, yellow `unreachable`, magenta `timeout`, dim `cancelled`.
-Everything secondary — the duration, the cause, the run's elapsed time — is
-dimmed, and the host's name is bold rather than coloured. A host's own output is
-never coloured: it is remote bytes rshx cannot interpret, so it is passed
-through as it arrived. Every styled token is also written as plain text, so the
-report never depends on colour to be read.
+red `failed`, cyan `running`, yellow `unreachable`, magenta `timeout`, and dim
+`cancelled`. Everything secondary — the duration, the cause, the run's elapsed
+time, the pid — is dimmed, and the host's name is bold rather than coloured. A
+host's own output is never coloured: it is remote bytes rshx cannot interpret,
+so it is passed through as it arrived. Every styled token is also written as
+plain text, so the report never depends on colour to be read.
 
 ### JSON
 
@@ -417,10 +457,11 @@ authentication failure is `unreachable` — the command never ran — not `faile
 | Field | Notes |
 |-------|-------|
 | `host` | The host's name. |
-| `status` | `ok`, `failed`, `unreachable`, `timeout` or `cancelled`. |
-| `exit_code` | ssh's exit status. Absent for a `cancelled` host: there is none to report. |
+| `status` | `ok`, `failed`, `running`, `unreachable`, `timeout` or `cancelled`. |
+| `exit_code` | ssh's exit status, or the command's own. Absent for a `cancelled` host, and for a `running` one: neither has one to report. |
 | `cause` | `auth`, `dns` or `connect`. Absent unless one was recognised. |
 | `duration_ms` | How long the host took. |
+| `pid` | The pid of the shell running the command. Present only on a `--detach` run's lines, which is the one thing rshx is told it. |
 | `stdout` / `stderr` | Captured verbatim, as JSON strings. |
 | `truncated` | Whether either stream lost bytes to the cap. |
 | `remote_stopped` | Whether rshx stopped the host's command there. `false` on a `cancelled` or `timeout` host means rshx could not, and the command may still be running. |
@@ -454,6 +495,7 @@ never touches stdout.
 |--------|---------|
 | `ok` | The command ran and returned zero. |
 | `failed` | The command ran and returned non-zero. |
+| `running` | The command was started and left running there. Only `--detach` reports it. |
 | `unreachable` | ssh itself failed, so the command never ran. |
 | `timeout` | rshx gave up waiting, and stopped the command on the host. |
 | `cancelled` | The run was interrupted before the host's outcome was known; the command was stopped the same way. |
@@ -481,7 +523,9 @@ ssh's text says nothing useful.
 | `99` | The run was interrupted. |
 
 `cancelled` is not a failure: rshx stopped waiting, the command did not fail. So
-a run that was interrupted exits `99` and nothing else.
+a run that was interrupted exits `99` and nothing else. `running` is not a
+failure either: rshx started the command and left it to run, which is what
+`--detach` was asked for.
 
 ## Timeouts and interrupts
 
@@ -534,20 +578,23 @@ The options come before the subcommand; `rshx run -h` prints the run's own:
 ```
 Run command or script on hosts
 
-Usage: rshx run <--script <SCRIPT_PATH>|COMMAND>
+Usage: rshx run [OPTIONS] <--script <SCRIPT_PATH>|COMMAND>
 
 Arguments:
   [COMMAND]...  The command to run on every host, after `--`
 
 Options:
       --script <SCRIPT_PATH>  Script file to run on every Host
+      --detach                Start the command on every Host and return without waiting for it
   -h, --help                  Print help (see more with '--help')
 ```
 
 Exactly one of the two is given: a command after `--`, or `--script FILE`.
+`--detach` is what the run does with that command rather than which command it
+is, so it sits beside it rather than in the choice.
 
-`ping` and `list` take no arguments of their own: everything they answer from
-is in the options above. A run's options that shape a command — `-f`, `-q`,
+`ping` and `list` take no arguments of their own: everything they answer from is
+in the options above. A run's options that shape a command — `-f`, `-q`,
 `--stderr`, `--privilege`, `--timeout` — have nothing to shape in a listing,
 which runs nothing, and are accepted and ignored there.
 

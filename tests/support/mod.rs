@@ -288,8 +288,8 @@ impl Harness {
     }
 
     /// Every stop connection rshx made, as its argv: one per Host it cut short
-    /// and could reach again. A stop is the only invocation carrying
-    /// `BatchMode=yes`.
+    /// and could reach again. A stop is the only connection rshx makes that
+    /// carries `BatchMode=yes`: it must not be able to prompt.
     pub fn stops(&self) -> Vec<Vec<String>> {
         self.invocations()
             .into_iter()
@@ -324,6 +324,24 @@ impl Harness {
             .find(|(dest, _)| dest == destination)
             .unwrap_or_else(|| panic!("{destination} was never asked to run a command"))
             .1
+    }
+
+    /// The word rshx handed one Host's ssh for its own command, exactly as it
+    /// was handed over: the last one, since a run that put something on the
+    /// Host first — a copied script — sent that one earlier. A detached run's
+    /// word is its launcher, not a command wrapper, so `command_for` cannot
+    /// read that one back.
+    pub fn word_for(&self, destination: &str) -> String {
+        self.invocations()
+            .into_iter()
+            .filter(|argv| !argv.iter().any(|arg| arg == "BatchMode=yes"))
+            .filter_map(|argv| {
+                let separator = argv.iter().position(|arg| arg == "--")?;
+                let word = argv.last()?;
+                (argv.get(separator + 1)? == destination).then(|| word.clone())
+            })
+            .next_back()
+            .unwrap_or_else(|| panic!("{destination} was never asked to run anything"))
     }
 
     /// Every password the fake ssh read from its stdin, as `(destination,
@@ -898,16 +916,23 @@ const STUB: &str = r#"#!/bin/sh
 dir="$RSHX_STUB_DIR"
 
 # The argv of this invocation: one record, fields separated by US (0x1f) and
-# the record terminated by RS (0x1e). Built as one string and written once. A
-# printf per field would be a write per field, and concurrent invocations would
-# then interleave inside a record: each write appends atomically, but the
-# record as a whole would not be. RS rather than a newline terminates it,
+# the record terminated by RS (0x1e). RS rather than a newline terminates it,
 # because an argument may hold a newline of its own.
+#
+# Appended under a lock. A record is built as one string and written once, but
+# one write is not enough: a record carrying a whole shell script is past the
+# size the shell hands the kernel in a single write, so a run making several
+# invocations at once — three Hosts stopped at the same moment — would
+# interleave two records into one and lose both. The lock is released before
+# anything else, so a slow invocation never holds up a fast one.
 us=$(printf '\037')
 rs=$(printf '\036')
 line=
 for arg in "$@"; do line="$line$arg$us"; done
-printf '%s%s' "$line" "$rs" >> "$dir/argv"
+exec 9>>"$dir/argv"
+flock -x 9
+printf '%s%s' "$line" "$rs" >&9
+exec 9>&-
 
 # Whether this is a stop connection: rshx makes one only to stop a Host's
 # command, and always with `BatchMode=yes`, which no other invocation carries.

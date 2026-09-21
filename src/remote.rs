@@ -1,5 +1,6 @@
 //! The remote side of a run: the ssh command for a Host, the marker that names
-//! the command rshx starts there, and stopping that command again.
+//! the command rshx starts there, stopping that command again, and the launcher
+//! that starts one without waiting for it.
 //!
 //! Killing a Host's ssh does not stop what it started. The remote command
 //! belongs to the sshd session, not to the connection: it outlives the ssh
@@ -8,6 +9,10 @@
 //! rshx's own on the Host — and a second connection reads that file and stops
 //! the tree below it. The second connection is best-effort: a Host rshx cannot
 //! reach again is reported as one whose command may still be running.
+//!
+//! A detached run leaves that same marker and nothing else: rshx starts the
+//! command, is told its pid, and returns. What it started is on its own from
+//! there, and the marker is gone when the command ends.
 
 use std::process::Stdio;
 use std::sync::LazyLock;
@@ -95,29 +100,76 @@ pub fn marked(marker: &str, command: &[String]) -> String {
     let script = format!(
         "m={marker}; echo $$ > \"$m\" 2>/dev/null; ( {text} ); rc=$?; rm -f -- \"$m\"; exit $rc"
     );
-    // Every quote the command brought is closed and reopened, so the login
-    // shell reads the whole script as one word and hands it over untouched.
+    one_word(&script)
+}
+
+/// A shell script as the one word ssh is handed: the script is quoted so that
+/// it arrives whole, whatever the login shell that reads the line makes of
+/// quotes. Every quote inside is closed and reopened.
+fn one_word(script: &str) -> String {
     format!("sh -c '{}'", script.replace('\'', r"'\''"))
+}
+
+/// A Host's command, started and left running: ssh returns once the command has
+/// started, instead of waiting for it to end.
+///
+/// A detached command is not rshx's to wait for any more, so nothing of its own
+/// comes back over the ssh channel: the channel is what the Host's ssh waits
+/// on, and a command still holding it would keep the connection open for as
+/// long as it ran. Both its streams therefore go to `/dev/null`, and the run
+/// keeps no record of it — the marker beside it is the only thing rshx leaves
+/// on the Host, and the command's own end removes that.
+///
+/// What the launcher prints is the pid of the shell that runs the command — the
+/// same shell the marker names, and the root of the tree a stop walks — so a
+/// launch cut short is stopped by the same script as an attached run. `nohup`
+/// and the redirects are what let the command outlive the connection: the
+/// streams are no longer the channel's, and a session teardown that sends
+/// `SIGHUP` cannot reach it. `setsid` would buy nothing more, since sshd
+/// signals no group of a session it allocated no terminal for.
+///
+/// Under `privilege` the elevation sits *outside* the launcher, not inside the
+/// payload: sudo's prompt has to reach rshx, and the payload's own streams are
+/// discarded. The payload only starts once sudo has authenticated, so a Host
+/// reported `running` is one whose command really is running as root.
+pub fn detached(marker: &str, text: &str, privilege: bool) -> String {
+    let payload = format!(
+        "echo $$ > \"{marker}\" 2>/dev/null; ( {text} ); rc=$?; rm -f -- \"{marker}\"; exit $rc"
+    );
+    let launcher = format!(
+        "nohup {} >/dev/null 2>&1 </dev/null & echo $!",
+        one_word(&payload)
+    );
+    let launched = match privilege {
+        // The launcher as one word, so the sudo elevates all of it rather than
+        // the first command in it — and so the login shell never has to parse
+        // the `;`, `&` and quotes the launcher is written in.
+        true => crate::privilege::under_sudo(&[one_word(&launcher)]).join(" "),
+        false => launcher,
+    };
+    one_word(&launched)
 }
 
 /// Stops the command a Host's ssh started, by the marker rshx wrote beside it.
 ///
 /// `privilege` is whether the run elevated: a command started under `sudo`
 /// belongs to root, and only root can signal it. `password` is the one the run
-/// already has, if it has one — a stop must not ask for another. A Host with
-/// nothing to stop is not a failure: the marker is gone exactly when the
-/// command has already ended.
+/// already has, if it has one — a stop must not ask for another, and with none
+/// to give, only a sudo that wants none may run it. A Host with nothing to stop
+/// is not a failure: the marker is gone exactly when the command has already
+/// ended.
 pub async fn stop(
     host: &Host,
     marker: &str,
     privilege: bool,
     password: Option<&[u8]>,
 ) -> Result<(), String> {
+    let words = stop_argv(marker, privilege, password.is_some());
     // Nothing on this connection can prompt: the password, when there is one,
     // is written for the Host's sudo, and an ssh that wants one of its own has
     // to fail rather than read it.
     let mut child = ssh(host, &[("BatchMode", "yes")]);
-    child.args(stop_argv(marker, privilege, password.is_some()));
+    child.args(words);
     child.stdin(match password {
         Some(_) => Stdio::piped(),
         None => Stdio::null(),
@@ -157,31 +209,29 @@ pub async fn stop(
     }
 }
 
-/// The words a Host runs to stop its own command. The marker path is the
-/// script's `$0`, which `sh -c` passes without rshx quoting it into the text.
+/// The words a Host runs to stop its own command: `sh -c` and the script, with
+/// the marker as the script's `$0`, which `sh -c` passes without rshx quoting
+/// it into the text.
 fn stop_argv(marker: &str, privilege: bool, password: bool) -> Vec<String> {
-    let mut argv: Vec<String> = Vec::new();
-    if privilege {
-        // A password the run already has is written to this ssh's stdin; with
-        // none to give, `-n` succeeds exactly when the Host's sudo wants none.
-        // The prompt is empty: nothing here is recognised, so nothing of
+    let words = vec![
+        "sh".to_string(),
+        "-c".to_string(),
+        // One shell word, so the sudo in front of it elevates all of it.
+        format!("'{STOP}'"),
+        marker.to_string(),
+    ];
+    match privilege {
+        // A password the run already has is written to this connection's stdin;
+        // with none to give, `-n` succeeds exactly when the Host's sudo wants
+        // none. The prompt is empty: nothing here is recognised, so nothing of
         // rshx's own is printed into the reason a stop failed.
-        if password {
-            argv.extend(["sudo", "-S", "-p", "", "--"].map(String::from));
-        } else {
-            argv.extend(["sudo", "-n", "--"].map(String::from));
-        }
+        true => crate::privilege::under_sudo_unprompted(&words, password),
+        false => words,
     }
-    argv.push("sh".into());
-    argv.push("-c".into());
-    // One shell word, so the sudo above elevates all of it.
-    argv.push(format!("'{STOP}'"));
-    argv.push(marker.to_string());
-    argv
 }
 
-/// Why a stop failed, from what the Host's ssh printed. ssh's own status is
-/// what rshx reports, so a stop ssh could not make reads as one rshx could
+/// Why a connection failed, from what the Host's ssh printed. ssh's own status
+/// is what rshx reports, so a stop ssh could not make reads as one rshx could
 /// not make.
 fn reason(stderr: &[u8], code: Option<i32>) -> String {
     let text = String::from_utf8_lossy(stderr);
@@ -191,7 +241,7 @@ fn reason(stderr: &[u8], code: Option<i32>) -> String {
     }
     match code {
         Some(code) => format!("ssh exited with status {code}"),
-        None => "the stop connection was killed".into(),
+        None => "the connection was killed".into(),
     }
 }
 
@@ -256,8 +306,29 @@ mod tests {
             Dir(dir)
         }
 
+        fn file(&self, name: &str) -> String {
+            self.0.join(name).display().to_string()
+        }
+
+        /// The one file a run leaves on a Host, as a Host's would be named.
         fn marker(&self) -> String {
-            self.0.join("marker.pid").display().to_string()
+            self.file("run.pid")
+        }
+
+        /// Every file in here, by name.
+        fn files(&self) -> Vec<String> {
+            let mut files: Vec<String> = std::fs::read_dir(&self.0)
+                .expect("read the directory")
+                .map(|entry| {
+                    entry
+                        .expect("an entry")
+                        .file_name()
+                        .to_string_lossy()
+                        .into_owned()
+                })
+                .collect();
+            files.sort();
+            files
         }
     }
 
@@ -290,8 +361,8 @@ mod tests {
             .expect("run the stop script")
     }
 
-    /// Waits for the marker to appear, and answers the pid in it.
-    fn recorded(marker: &str) -> i32 {
+    /// The pid the marker names, once it names one.
+    fn recorded_pid(marker: &str) -> i32 {
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
         while std::time::Instant::now() < deadline {
             if let Ok(text) = std::fs::read_to_string(marker)
@@ -301,7 +372,20 @@ mod tests {
             }
             std::thread::sleep(Duration::from_millis(10));
         }
-        panic!("the marker {marker} was never written");
+        panic!("{marker} never named a pid");
+    }
+
+    /// Waits for something a Host does on its own clock: a launch that has
+    /// already returned cannot be asked whether the command got there.
+    fn wait_until(what: &str, mut ready: impl FnMut() -> bool) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while std::time::Instant::now() < deadline {
+            if ready() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("{what} never happened");
     }
 
     /// Every process below `root`, as the stop script finds them.
@@ -358,38 +442,50 @@ mod tests {
     }
 
     #[test]
-    fn a_stop_elevates_exactly_when_the_run_did() {
-        let marker = "/tmp/rshx-1-node01.pid";
-        let plain = stop_argv(marker, false, false);
+    fn a_stop_hands_over_the_script_and_the_marker() {
+        let plain = stop_argv("/tmp/m.pid", false, false);
         assert_eq!(
-            plain[..2],
-            ["sh", "-c"],
-            "a run that did not elevate stops its command as itself: {plain:?}"
-        );
-        assert_eq!(
-            plain[2],
-            format!("'{STOP}'"),
-            "and hands the script over as one word: {plain:?}"
-        );
-        assert_eq!(
-            plain.last().unwrap(),
-            marker,
-            "and names its marker: {plain:?}"
+            plain,
+            words(&["sh", "-c", &format!("'{STOP}'"), "/tmp/m.pid"]),
+            "a stop runs as the Host's user unless the run elevated"
         );
 
-        let with_password = stop_argv(marker, true, true);
+        // Under `--privilege` the sudo is in front of the whole script, and the
+        // marker rides behind it as `sh -c`'s `$0`.
+        let given = stop_argv("/tmp/m.pid", true, true);
         assert_eq!(
-            with_password[..4],
+            given[..4],
             ["sudo", "-S", "-p", ""],
-            "an elevated run stops as root, with the password it already has: {with_password:?}"
+            "a stop with the run's password writes it, and prompts for nothing: {given:?}"
         );
-
-        let without_password = stop_argv(marker, true, false);
         assert_eq!(
-            without_password[..3],
-            ["sudo", "-n", "--"],
-            "and with no password, only a sudo that needs none may run it: {without_password:?}"
+            given[4..],
+            ["--", "sh", "-c", &format!("'{STOP}'"), "/tmp/m.pid"],
+            "and the script is still one word: {given:?}"
         );
+        let asked = stop_argv("/tmp/m.pid", true, false);
+        assert_eq!(
+            asked[..3],
+            ["sudo", "-n", "--"],
+            "with no password in hand, only a sudo that wants none may run it: {asked:?}"
+        );
+    }
+
+    #[test]
+    fn a_marker_is_one_path_a_shell_cannot_read_into() {
+        // The marker is written into the payload and into the stop script as
+        // text, so it holds nothing either shell could act on.
+        let one = marker("node01");
+        assert!(
+            one.starts_with("/tmp/rshx-") && one.ends_with("-node01.pid"),
+            "the run and the Host it is on: {one}"
+        );
+        assert!(
+            one.chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '.' | '_' | '-')),
+            "and nothing a shell reads: {one}"
+        );
+        assert_ne!(one, marker("node02"), "one marker per Host");
     }
 
     #[test]
@@ -456,7 +552,7 @@ mod tests {
         // a stop has to walk.
         let line = marked(&marker, &words(&["sh", "-c", "'sleep 300; sleep 300'"]));
         let mut running = shell(&line).spawn().expect("start the marked command");
-        let root = recorded(&marker);
+        let root = recorded_pid(&marker);
         let tree = descendants(root);
         assert!(
             tree.len() >= 3,
@@ -481,19 +577,116 @@ mod tests {
     }
 
     #[test]
+    fn a_stop_takes_what_a_detached_launch_started() {
+        let dir = Dir::new("detached-stop");
+        let marker = dir.marker();
+        let line = detached(&marker, "sleep 300", false);
+        shell(&line).output().expect("run the detached launch");
+        let pid = recorded_pid(&marker);
+
+        let out = stop(&marker);
+
+        assert!(out.status.success(), "{:?}", out.stderr);
+        assert!(gone(pid), "the command a detached launch started is gone");
+        assert!(!Path::new(&marker).exists(), "and the marker with it");
+    }
+
+    #[test]
     fn a_stop_with_nothing_to_stop_is_not_a_failure() {
         let dir = Dir::new("missing");
-        let out = stop(&dir.marker());
+        let marker = dir.marker();
+        let out = stop(&marker);
         assert!(
             out.status.success(),
-            "a marker that is gone means the command ended: {:?}",
+            "a run with no marker at all is nothing to stop: {:?}",
             out.stderr
         );
 
         // And one that holds something that is not a pid is not one either.
-        let marker = dir.marker();
         std::fs::write(&marker, "not a pid\n").expect("write the marker");
         let out = stop(&marker);
+
         assert!(out.status.success(), "{:?}", out.stderr);
+        assert!(
+            !Path::new(&marker).exists(),
+            "a marker with no pid in it names nothing, and goes"
+        );
+    }
+
+    #[test]
+    fn a_detached_command_runs_on_with_nothing_left_beside_it() {
+        let dir = Dir::new("detached");
+        let marker = dir.marker();
+        let ran = dir.file("ran");
+        // The command's own output has nowhere to go: the connection that
+        // started it has already returned.
+        let line = detached(
+            &marker,
+            &format!("echo hi; echo bad >&2; touch {ran}; exit 7"),
+            false,
+        );
+
+        let out = shell(&line).output().expect("run the detached launch");
+
+        let launched: i32 = String::from_utf8_lossy(&out.stdout)
+            .trim()
+            .parse()
+            .expect("the launcher prints the pid it started");
+        assert!(launched > 0, "and the pid is the shell's: {launched}");
+        wait_until("the command to run", || Path::new(&ran).exists());
+        // The marker is written while the command runs and removed when it
+        // ends: a command that fast leaves nothing at all behind.
+        wait_until("the marker to go", || !Path::new(&marker).exists());
+        assert_eq!(
+            dir.files(),
+            ["ran"],
+            "the run leaves the command's own doings, and no record of its own"
+        );
+    }
+
+    #[test]
+    fn a_detached_launch_reports_a_pid_while_the_command_is_still_running() {
+        let dir = Dir::new("detached-alive");
+        let marker = dir.marker();
+        let line = detached(&marker, "sleep 300", false);
+
+        let out = shell(&line).output().expect("run the detached launch");
+
+        let launched: i32 = String::from_utf8_lossy(&out.stdout)
+            .trim()
+            .parse()
+            .expect("the launcher prints the pid it started");
+        assert_eq!(
+            recorded_pid(&marker),
+            launched,
+            "the marker names the shell the launch reported"
+        );
+        assert!(!gone(launched), "which is still running");
+        stop(&marker);
+    }
+
+    #[test]
+    fn a_detached_launch_under_privilege_elevates_the_launcher_alone() {
+        let dir = Dir::new("privileged");
+        let marker = dir.marker();
+        let line = detached(&marker, "id -u", true);
+
+        // The sudo is outside the launcher, so its prompt is written to the
+        // connection — where rshx watches for it — rather than to the run's
+        // own streams, which go nowhere.
+        assert!(
+            line.starts_with("sh -c 'sudo -S -p rshx-password: sh -c "),
+            "the elevation is the launcher's: {line}"
+        );
+        // And only outside: the payload runs as root already, so a second
+        // elevation would be rshx's own sudo asking again.
+        let payload = line
+            .split_once("nohup")
+            .expect("the launcher backgrounds the payload")
+            .1;
+        assert!(
+            !payload.contains("sudo"),
+            "the payload holds no elevation of its own: {payload}"
+        );
     }
 }

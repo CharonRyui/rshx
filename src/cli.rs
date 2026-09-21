@@ -63,7 +63,10 @@ pub struct CliOptions {
 }
 
 #[derive(Debug, Args)]
-#[group(required = true, multiple = false)]
+// The group is spelled out rather than derived from the struct: a `#[group]`
+// on the struct takes every field in it, so `--detach` would be an alternative
+// to the command instead of something a run does with one.
+#[command(group = clap::ArgGroup::new("action").required(true).multiple(false).args(["script", "command"]))]
 pub struct CliRunArgs {
     /// Script file to run on every Host
     ///
@@ -81,6 +84,14 @@ pub struct CliRunArgs {
         allow_hyphen_values = true
     )]
     pub command: Vec<String>,
+
+    /// Start the command on every Host and return without waiting for it.
+    ///
+    /// It is reported as `running`, with the pid of the shell running it, and
+    /// left to run on its own: rshx keeps nothing of it, and its output goes
+    /// nowhere.
+    #[arg(long)]
+    pub detach: bool,
 }
 
 /// Run operations on many hosts over ssh.
