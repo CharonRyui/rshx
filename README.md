@@ -4,7 +4,7 @@ Run one command — or one script — on many hosts over ssh, with a bounded fan
 and a readable per-host report.
 
 ```console
-$ rshx -H hosts.toml run -- du -hs /data
+$ rshx -H hosts.toml run du -hs /data
 du -hs /data  ·  4 hosts
 node01 ok          0.31s  42G	/data
 node02 ok          0.28s  38G	/data
@@ -73,15 +73,28 @@ name = "node[01-04]"
 [groups]
 ascend = ["node[01-04]"]
 
-$ rshx -H hosts.toml run -- uptime
-$ rshx -H hosts.toml -g ascend run -- npu-smi info
-$ rshx -H hosts.toml -f 64 --timeout 30s run -- systemctl status kubelet
-$ rshx -H hosts.toml run --script ./collect.sh
-$ rshx -H hosts.toml --json run -- hostname | jq -r '.host'
-$ rshx -H hosts.toml -g ascend run --detach -- ./bench.sh
-$ rshx -H hosts.toml ping
-$ rshx -H hosts.toml -g ascend list
+$ rshx -H hosts.toml r uptime
+$ rshx -H hosts.toml -g ascend r npu-smi info
+$ rshx -H hosts.toml -f 64 -t 30s r systemctl status kubelet
+$ rshx -H hosts.toml r -s ./collect.sh
+$ rshx -H hosts.toml -j r hostname | jq -r '.host'
+$ rshx -H hosts.toml -g ascend r -d ./bench.sh
+$ rshx -H hosts.toml p
+$ rshx -H hosts.toml -g ascend ls
 ```
+
+The subcommands and the options above have short spellings — `r` for `run`, `-t`
+for `--timeout` — and the rest of this file spells them out. The [Short
+spellings](#short-spellings) table has the whole list.
+
+Two things about how that reads:
+
+- **The command starts at its first word.** rshx's options go before it, on
+  either side of the subcommand: `rshx r -H hosts.toml uptime` is the same run
+  as `rshx -H hosts.toml r uptime`. Everything after the first word is the
+  command's, so `rshx r echo -q` echoes `-q` rather than going quiet.
+- **`--` is optional.** It is needed only when the command's first word starts
+  with a hyphen: `rshx -H hosts.toml r -- -la /tmp`.
 
 ## The host file
 
@@ -236,11 +249,29 @@ was itself an error.
 
 ## Running a command
 
-Everything after `--` is the command. rshx joins those words into one line and
-hands it to the host, which runs it with `sh`:
+The command starts at its first word and takes everything after it. rshx joins
+those words into one line and hands it to the host, which runs it with `sh`:
 
 ```console
-$ rshx -H hosts.toml run -- du -hs /data
+$ rshx -H hosts.toml run du -hs /data
+```
+
+Everything after that first word belongs to the command, so rshx's own options
+go before it — on either side of the subcommand, and either way they are read
+the same:
+
+```console
+$ rshx -H hosts.toml -q run du -hs /data
+$ rshx run -H hosts.toml -q du -hs /data
+```
+
+An option *after* the command is the command's, never rshx's: in
+`rshx run echo -q` the `-q` is echoed, and rshx stays unquiet. A command whose
+first word begins with a hyphen is the one case that needs `--`, which says the
+next word is the command whatever it looks like:
+
+```console
+$ rshx -H hosts.toml run -- -la /tmp
 ```
 
 The host's *login* shell — whatever its user happens to run, from a POSIX `sh`
@@ -248,7 +279,7 @@ to fish — is only asked to start that `sh` and hand it the line, so a host who
 user keeps a shell of their own runs the command exactly as any other does.
 Write the command as `sh` will read it: the words are joined with spaces, so a
 word holding one is split there, and quoting for the host's shell is what keeps
-it together — `run -- sh -c 'psql -c "select 1"'`.
+it together — `run sh -c 'psql -c "select 1"'`.
 
 Each command is named on the host before it runs — the pid of that `sh`, in a
 file of rshx's own under `/tmp` — and the name is removed when the command ends,
@@ -264,7 +295,7 @@ again is reported as one whose command may still be running.
 password prompt when a host's sudo asks for one.
 
 ```console
-$ rshx -H hosts.toml --privilege run -- systemctl restart nginx
+$ rshx -H hosts.toml --privilege run systemctl restart nginx
 sudo -S -p rshx-password: systemctl restart nginx · 4 hosts
 privilege password:
 node01 ok 0.42s
@@ -286,7 +317,7 @@ as it actually runs, plumbing included.
 To be another user, be it from root, which needs no password to do it:
 
 ```console
-$ rshx -H hosts.toml --privilege run -- sh -c 'sudo -u postgres pg_dump mydb'
+$ rshx -H hosts.toml --privilege run sh -c 'sudo -u postgres pg_dump mydb'
 ```
 
 The password is asked for **once per run**, on the terminal, and written to
@@ -357,7 +388,7 @@ and the script is not run there.
 it, reporting `running` with the pid of the shell running it:
 
 ```console
-$ rshx -H hosts.toml -g ascend run --detach -- ./bench.sh
+$ rshx -H hosts.toml -g ascend run --detach ./bench.sh
 hellohpc-ascend0 running 0.49s pid 1581766
 hellohpc-ascend1 running 0.51s pid 4119022
 2 hosts: 0 ok, 2 running in 0.51s
@@ -376,7 +407,7 @@ marker that names the command, which the command's own end removes:
 A detached command that needs its output kept must keep it itself:
 
 ```console
-$ rshx -H hosts.toml -g ascend run --detach -- sh -c './bench.sh >bench.log 2>&1'
+$ rshx -H hosts.toml -g ascend run --detach sh -c './bench.sh >bench.log 2>&1'
 ```
 
 The marker is what a stop finds the command by, so a launch that is cut short is
@@ -447,7 +478,7 @@ plain text, so the report never depends on colour to be read.
 omitted rather than written as `null`.
 
 ```console
-$ rshx -H hosts.toml --json run -- du -hs /data | jq -c 'select(.status != "ok")'
+$ rshx -H hosts.toml --json run du -hs /data | jq -c 'select(.status != "ok")'
 {"host":"gpu02","status":"unreachable","exit_code":255,"cause":"auth","duration_ms":4,"stdout":"","stderr":"Permission denied (publickey).\n","truncated":false,"remote_stopped":false}
 ```
 
@@ -474,7 +505,7 @@ is a terminal: it is absent from a redirected stderr, and off entirely under
 alive rather than looking hung:
 
 ```console
-$ rshx -H hosts.toml run -- du -hs /data
+$ rshx -H hosts.toml run du -hs /data
 du -hs /data  ·  200 hosts, fanout 32
 ⠸ 95/200 done ━━━━━━━━━━━━━━━━━━━╸───────────────────── 30 running, node096 0.4s
 ```
@@ -554,9 +585,9 @@ Run operations on many hosts over ssh
 Usage: rshx [OPTIONS] <COMMAND>
 
 Commands:
-  run   Run command or script on hosts
-  ping  Check all hosts are available
-  list  List the Hosts a run would select, without contacting any of them
+  run   Run command or script on hosts [alias: r]
+  ping  Check all hosts are available [alias: p]
+  list  List the Hosts a run would select, without contacting any of them [alias: ls]
   help  Print this message or the help of the given subcommand(s)
 
 Options:
@@ -565,15 +596,17 @@ Options:
   -g, --groups <GROUP>      Run only the Hosts these groups select. Repeatable, each value may be comma-separated; defaults to every Host in the host file. One value per occurrence: a group name is never read as the subcommand
   -q, --quiet               Hide each Host's stdout
       --stderr              Show an `ok` Host's stderr; one that is not `ok` always shows stderr
-      --privilege           Run the command as root, with `sudo`, answering its password prompt from the terminal when a Host asks. The command is wrapped whole, so an inner `sudo` keeps its own options and elevates a second time inside rshx's; a Host that needs its own password says so in the host file
-      --timeout <DURATION>  How long to wait for any one Host, such as `30s` or `5m`; without it there is no limit. A Host that times out is reported as `timeout`, its ssh is terminated, and the command is stopped on the Host
-      --json                Write one JSON object per Host, one per line, instead of the plain report. stdout carries nothing else, and the heartbeat is off
+  -p, --privilege           Run the command as root, with `sudo`, answering its password prompt from the terminal when a Host asks. The command is wrapped whole, so an inner `sudo` keeps its own options and elevates a second time inside rshx's; a Host that needs its own password says so in the host file
+  -t, --timeout <DURATION>  How long to wait for any one Host, such as `30s` or `5m`; without it there is no limit. A Host that times out is reported as `timeout`, its ssh is terminated, and the command is stopped on the Host
+  -j, --json                Write one JSON object per Host, one per line, instead of the plain report. stdout carries nothing else, and the heartbeat is off
       --color <COLOR>       When to colour the report [default: auto] [possible values: auto, always, never]
   -h, --help                Print help (see more with '--help')
   -V, --version             Print version
 ```
 
-The options come before the subcommand; `rshx run -h` prints the run's own:
+The options are global: they may come before the subcommand or after it, and are
+read the same either way. `rshx run -h` prints the run's own, and every option
+above is listed there too, since a run answers to all of them:
 
 ```
 Run command or script on hosts
@@ -581,24 +614,65 @@ Run command or script on hosts
 Usage: rshx run [OPTIONS] <--script <SCRIPT_PATH>|COMMAND>
 
 Arguments:
-  [COMMAND]...  The command to run on every host, after `--`
+  [COMMAND]...  The command to run on every host
 
 Options:
-      --script <SCRIPT_PATH>  Script file to run on every Host
-      --detach                Start the command on every Host and return without waiting for it
+  -H, --host-file <FILE>      The host file listing the hosts to run on
+  -s, --script <SCRIPT_PATH>  Script file to run on every Host
+  -d, --detach                Start the command on every Host and return without waiting for it
+  -f, --fanout <N>            How many commands run at once; a finish is replaced by a pending one [default: 32]
+  -g, --groups <GROUP>        Run only the Hosts these groups select. Repeatable, each value may be comma-separated; defaults to every Host in the host file. One value per occurrence: a group name is never read as the subcommand
+  -q, --quiet                 Hide each Host's stdout
+      --stderr                Show an `ok` Host's stderr; one that is not `ok` always shows stderr
+  -p, --privilege             Run the command as root, with `sudo`, answering its password prompt from the terminal when a Host asks. The command is wrapped whole, so an inner `sudo` keeps its own options and elevates a second time inside rshx's; a Host that needs its own password says so in the host file
+  -t, --timeout <DURATION>    How long to wait for any one Host, such as `30s` or `5m`; without it there is no limit. A Host that times out is reported as `timeout`, its ssh is terminated, and the command is stopped on the Host
+  -j, --json                  Write one JSON object per Host, one per line, instead of the plain report. stdout carries nothing else, and the heartbeat is off
+      --color <COLOR>         When to colour the report [default: auto] [possible values: auto, always, never]
   -h, --help                  Print help (see more with '--help')
 ```
 
-Exactly one of the two is given: a command after `--`, or `--script FILE`.
-`--detach` is what the run does with that command rather than which command it
-is, so it sits beside it rather than in the choice.
+Exactly one of the two is given: a command, or `--script FILE`. `--detach` is
+what the run does with that command rather than which command it is, so it sits
+beside it rather than in the choice.
 
 `ping` and `list` take no arguments of their own: everything they answer from is
 in the options above. A run's options that shape a command — `-f`, `-q`,
 `--stderr`, `--privilege`, `--timeout` — have nothing to shape in a listing,
 which runs nothing, and are accepted and ignored there.
 
-The command goes after `--` and is forwarded to ssh verbatim as its own
-arguments — rshx does no shell joining, so ssh does it, exactly as it would if
-you typed the command yourself. A destination is never read as an option,
-because `--` ends option parsing.
+The command is forwarded to ssh verbatim as its own arguments — rshx does no
+shell joining, so ssh does it, exactly as it would if you typed the command
+yourself. A destination is never read as an option, because rshx puts `--` on
+the ssh command line before it. On rshx's own line the command ends rshx's
+options: the first word past them is the command, and everything after that word
+belongs to the command, so `rshx run echo -q` echoes `-q` rather than hiding the
+report.
+
+## Short spellings
+
+Every option that is typed often has a one-letter form, and each subcommand has
+a short alias. They are the same options and the same subcommands: nothing else
+changes.
+
+| Long | Short |
+|---|---|
+| `run` | `r` |
+| `ping` | `p` |
+| `list` | `ls` |
+| `--host-file` | `-H` |
+| `--fanout` | `-f` |
+| `--groups` | `-g` |
+| `--quiet` | `-q` |
+| `--privilege` | `-p` |
+| `--timeout` | `-t` |
+| `--json` | `-j` |
+| `--script` | `-s` |
+| `--detach` | `-d` |
+
+So a run reads as:
+
+```console
+$ rshx -H hosts.toml -g ascend -f 64 -t 30s r npu-smi info
+```
+
+`--stderr` and `--color` are set once and read once, so they stay spelled out.

@@ -3,7 +3,7 @@
 
 mod support;
 
-use support::{Response, run, with_harness};
+use support::{Response, Typed, run, run_on_tty_answering, with_harness};
 
 const THREE: &str = r#"
 [[hosts]]
@@ -90,6 +90,103 @@ fn forwards_the_command_verbatim_including_hyphen_arguments() {
             1,
             "every host is invoked exactly once: {invocations:?}"
         );
+    });
+}
+
+#[test]
+fn the_command_starts_at_its_first_word_and_takes_the_rest() {
+    with_harness(|harness| {
+        let file = harness.write("hosts.toml", THREE);
+        harness.respond_default(Response::ok().stdout("42G /data\n"));
+
+        // `-q` and `-p` are rshx's own options, but they come after the
+        // command, so they belong to the command: rshx must not read them.
+        let out = run({
+            let mut cmd = harness.rshx();
+            cmd.args(["-H", file.to_str().unwrap(), "run", "du", "-hs", "-q", "-p"]);
+            cmd
+        });
+
+        assert_eq!(out.code, 0, "{}", out.stderr);
+        assert_eq!(
+            harness.command_for("node01"),
+            "du -hs -q -p",
+            "an option after the command reaches the Host, never rshx"
+        );
+        assert!(
+            out.stdout.contains("42G"),
+            "-q after the command is not rshx's quiet: {:?}",
+            out.stdout
+        );
+    });
+}
+
+#[test]
+fn options_read_the_same_on_either_side_of_the_subcommand() {
+    with_harness(|harness| {
+        let file = harness.write("hosts.toml", THREE);
+        harness.respond_default(Response::ok().stdout("42G /data\n"));
+
+        // Every option after the subcommand, before the command: the host file
+        // is found (or the run would not happen), and `-q` takes effect.
+        let out = run({
+            let mut cmd = harness.rshx();
+            cmd.args([
+                "r",
+                "-H",
+                file.to_str().unwrap(),
+                "-f",
+                "1",
+                "-q",
+                "du",
+                "-hs",
+                "/data",
+            ]);
+            cmd
+        });
+
+        assert_eq!(out.code, 0, "{}", out.stderr);
+        assert_eq!(
+            harness.command_for("node01"),
+            "du -hs /data",
+            "the command is what follows the options"
+        );
+        assert!(
+            !out.stdout.contains("42G"),
+            "-q before the command is rshx's quiet: {:?}",
+            out.stdout
+        );
+    });
+}
+
+#[test]
+fn a_command_whose_first_word_starts_with_a_hyphen_needs_the_separator() {
+    with_harness(|harness| {
+        let file = harness.write("hosts.toml", THREE);
+        harness.respond_default(Response::ok());
+
+        // Nothing sensible begins with a hyphen, so this is refused loudly
+        // rather than handed to the Host as a command of rshx's options.
+        let refused = run({
+            let mut cmd = harness.rshx();
+            cmd.args(["-H", file.to_str().unwrap(), "run", "-la", "/tmp"]);
+            cmd
+        });
+        assert_eq!(refused.code, 5, "{}", refused.stderr);
+        assert!(
+            harness.invocations().is_empty(),
+            "nothing runs when the command is refused"
+        );
+
+        // `--` is what says the next word is the command, whatever it looks
+        // like; it stays optional everywhere else.
+        let forwarded = run({
+            let mut cmd = harness.rshx();
+            cmd.args(["-H", file.to_str().unwrap(), "run", "--", "-la", "/tmp"]);
+            cmd
+        });
+        assert_eq!(forwarded.code, 0, "{}", forwarded.stderr);
+        assert_eq!(harness.command_for("node01"), "-la /tmp");
     });
 }
 
@@ -407,6 +504,115 @@ fn a_failed_host_shows_its_stderr() {
             out.stdout.contains("bash: nope: command not found"),
             "a host that is not ok always shows why: {:?}",
             out.stdout
+        );
+    });
+}
+
+#[test]
+fn the_short_spellings_are_the_same_run() {
+    with_harness(|harness| {
+        let file = harness.write("hosts.toml", THREE);
+        harness.respond_default(Response::ok());
+
+        // The long spelling, to compare against.
+        let long = run_on_tty_answering(
+            {
+                let mut cmd = harness.rshx();
+                cmd.args([
+                    "-H",
+                    file.to_str().unwrap(),
+                    "--privilege",
+                    "--timeout",
+                    "30s",
+                    "--json",
+                    "run",
+                    "--",
+                    "du",
+                    "-hs",
+                    "/data",
+                ]);
+                cmd
+            },
+            &[Typed::now("hunter2\n")],
+        );
+        assert_eq!(long.code, 0, "the long spelling runs: {}", long.stderr);
+        let long_command = harness.command_for("node03");
+
+        // The same run, in the spellings the help advertises: `r` for `run`,
+        // and a letter for each option.
+        let short = run_on_tty_answering(
+            {
+                let mut cmd = harness.rshx();
+                cmd.args([
+                    "-H",
+                    file.to_str().unwrap(),
+                    "-p",
+                    "-t",
+                    "30s",
+                    "-j",
+                    "r",
+                    "--",
+                    "du",
+                    "-hs",
+                    "/data",
+                ]);
+                cmd
+            },
+            &[Typed::now("hunter2\n")],
+        );
+
+        assert_eq!(short.code, long.code, "stderr: {}", short.stderr);
+        assert_eq!(
+            harness.commands().last().map(|(_, text)| text.clone()),
+            Some(long_command),
+            "the alias ran the same command on the Host"
+        );
+        assert_eq!(
+            short.stdout_lines().len(),
+            long.stdout_lines().len(),
+            "the alias reported one line per Host: {:?}",
+            short.stdout
+        );
+        assert!(
+            short.stdout.contains("\"status\":\"ok\""),
+            "-j is the json report: {:?}",
+            short.stdout
+        );
+    });
+}
+
+#[test]
+fn the_list_and_ping_aliases_answer_the_same_thing() {
+    with_harness(|harness| {
+        let file = harness.write("hosts.toml", THREE);
+        harness.respond_default(Response::ok());
+
+        let named = run({
+            let mut cmd = harness.rshx();
+            cmd.args(["-H", file.to_str().unwrap(), "list"]);
+            cmd
+        });
+        let aliased = run({
+            let mut cmd = harness.rshx();
+            cmd.args(["-H", file.to_str().unwrap(), "ls"]);
+            cmd
+        });
+        assert_eq!(aliased.code, 0, "stderr: {}", aliased.stderr);
+        assert_eq!(
+            aliased.stdout, named.stdout,
+            "`ls` is `list`: a listing contacts nothing, so it is the same output"
+        );
+
+        let pinged = run({
+            let mut cmd = harness.rshx();
+            cmd.args(["-H", file.to_str().unwrap(), "p"]);
+            cmd
+        });
+        assert_eq!(pinged.code, 0, "stderr: {}", pinged.stderr);
+        assert_eq!(
+            harness.command_for("node01"),
+            "echo pong",
+            "`p` is `ping`: it runs the ping command on the Host"
         );
     });
 }
