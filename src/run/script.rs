@@ -13,7 +13,10 @@ use crate::{
     interrupt::Interrupt,
     privilege, remote,
     report::Reporter,
-    run::{Outcome, Prompts, Status, execute_on_hosts, exit_code, launched, run_remote_command},
+    run::{
+        Outcome, Status, detach::launched, execute_on_hosts, exit_code, prompt::Prompts,
+        ssh::run_remote_command,
+    },
 };
 
 /// Runs a local script on every selected Host.

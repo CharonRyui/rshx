@@ -23,7 +23,7 @@ use tokio::process::Command;
 
 use crate::host::Host;
 use crate::interrupt;
-use crate::run::read_capped;
+use crate::run::stream::read_capped;
 
 /// How long a stop connection has to connect, authenticate, and stop a Host's
 /// command. Past it the Host is reported as one rshx could not stop: a run

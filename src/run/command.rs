@@ -8,7 +8,10 @@ use crate::{
     interrupt::Interrupt,
     remote,
     report::Reporter,
-    run::{Outcome, Prompts, execute_on_hosts, exit_code, launched, run_remote_command},
+    run::{
+        Outcome, detach::launched, execute_on_hosts, exit_code, prompt::Prompts,
+        ssh::run_remote_command,
+    },
 };
 
 pub(super) async fn execute_command(
