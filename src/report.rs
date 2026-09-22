@@ -36,6 +36,31 @@ pub(crate) fn stream<T: anstream::stream::RawStream>(when: ColorWhen, raw: T) ->
     }
 }
 
+/// Says which host file rshx picked for itself, when the command line named
+/// none. Not chrome: the file is one of the run's inputs, so a redirected
+/// stderr — a log, a CI job — is told too, and a run that reads a file the
+/// person did not mean is never a surprise.
+pub fn host_file_found(path: &std::path::Path, when: ColorWhen) {
+    let styles = Styles::new();
+    let mut stderr = stream(when, std::io::stderr());
+    note(
+        &mut stderr,
+        styles.info,
+        "info",
+        &format!("no --host-file given; using {}", path.display()),
+    );
+}
+
+/// One line about rshx's own doing: the prefix, the level, and the message.
+fn note<W: Write>(out: &mut W, level: Style, word: &str, message: &str) {
+    let _ = writeln!(
+        out,
+        "rshx: {}{word}:{} {message}",
+        level.render(),
+        level.render_reset()
+    );
+}
+
 /// Which streams the report shows.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Detail {
@@ -94,30 +119,15 @@ impl Reporter {
     /// the heading is about the run and is dropped when nobody is watching,
     /// while a warning is about the command rshx was asked to run.
     pub fn warning(&mut self, message: &str) {
-        let _ = writeln!(
-            self.stderr,
-            "rshx: {}warning:{} {message}",
-            self.styles.warn.render(),
-            self.styles.warn.render_reset()
-        );
+        note(&mut self.stderr, self.styles.warn, "warning", message);
     }
 
     pub fn info(&mut self, message: &str) {
-        let _ = writeln!(
-            self.stderr,
-            "rshx: {}info:{} {message}",
-            self.styles.info.render(),
-            self.styles.info.render_reset(),
-        );
+        note(&mut self.stderr, self.styles.info, "info", message);
     }
 
     pub fn error(&mut self, message: &str) {
-        let _ = writeln!(
-            self.stderr,
-            "rshx: {}error:{} {message}",
-            self.styles.error.render(),
-            self.styles.error.render_reset(),
-        );
+        note(&mut self.stderr, self.styles.error, "error", message);
     }
 
     /// One line naming what is about to run, so the report has a heading.

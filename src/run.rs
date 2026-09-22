@@ -36,8 +36,13 @@ pub use outcome::{Outcome, Status, exit_code};
 /// Loads the host file, then answers the subcommand the command line asked for.
 pub async fn execute(cli: &Cli) -> Result<u8> {
     let options = &cli.options;
-    let path = host::resolve_path(options.host_file.as_deref())?;
-    let file = host::load(&path)?;
+    let located = host::locate(options.host_file.as_deref())?;
+    // A file rshx found for itself is named before anything runs: the report is
+    // about Hosts, and which host file they came from is not in it.
+    if located.found {
+        report::host_file_found(&located.path, options.color);
+    }
+    let file = host::load(&located.path)?;
     let selected = file.select(&options.groups)?;
 
     match &cli.sub_command {

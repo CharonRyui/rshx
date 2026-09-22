@@ -104,6 +104,14 @@ fails telling you to pass `-H` or create `./rshx.toml` if neither exists. An
 explicit `-H` is used as written, so a typo is reported rather than quietly
 falling back to another file.
 
+A file rshx found for itself is named on stderr before anything runs, so which
+file the hosts came from is never a guess:
+
+```console
+$ rshx run uptime
+rshx: info: no --host-file given; using rshx.toml
+```
+
 ```toml
 # Every host is one [[hosts]] entry. `name` is the only required field.
 [[hosts]]

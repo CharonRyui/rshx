@@ -126,22 +126,36 @@ impl HostFile {
     }
 }
 
+/// The host file a command line reads, and whether rshx had to find it.
+pub struct Located {
+    pub path: PathBuf,
+    /// True when `-H` named no file and rshx picked one for itself: the current
+    /// directory's `rshx.toml`, or the config directory's `rshx/hosts.toml`.
+    pub found: bool,
+}
+
 /// Where the host file is, given the command line. An explicit `-H` is used as
 /// written, so a typo is reported rather than silently falling back.
-pub fn resolve_path(explicit: Option<&Path>) -> Result<PathBuf> {
+pub fn locate(explicit: Option<&Path>) -> Result<Located> {
     if let Some(path) = explicit {
-        return Ok(path.to_path_buf());
+        return Ok(Located {
+            path: path.to_path_buf(),
+            found: false,
+        });
     }
 
     let local = PathBuf::from("rshx.toml");
     if local.exists() {
-        return Ok(local);
+        return Ok(Located {
+            path: local,
+            found: true,
+        });
     }
 
     if let Some(path) = config_dir().map(|dir| dir.join("rshx").join("hosts.toml"))
         && path.exists()
     {
-        return Ok(path);
+        return Ok(Located { path, found: true });
     }
 
     bail!("no host file: pass --host-file FILE, or create ./rshx.toml")

@@ -426,6 +426,15 @@ fn the_host_file_is_found_by_default() {
         });
         assert_eq!(local.code, 0, "{}", local.stderr);
         assert_eq!(local.stdout_lines().len(), 3);
+        // A file rshx found for itself is named, so nobody has to guess which
+        // one the Hosts came from.
+        assert!(
+            local
+                .stderr
+                .contains("no --host-file given; using rshx.toml"),
+            "the local file is named: {:?}",
+            local.stderr
+        );
 
         // A host file in the current directory wins over the config directory.
         harness.write("xdg/rshx/hosts.toml", "[[hosts]]\nname = \"elsewhere\"\n");
@@ -452,6 +461,13 @@ fn the_host_file_is_found_by_default() {
             xdg.stdout.contains("elsewhere"),
             "the config directory is the fallback: {:?}",
             xdg.stdout
+        );
+        let config_file = harness.path().join("xdg/rshx/hosts.toml");
+        assert!(
+            xdg.stderr
+                .contains(&format!("using {}", config_file.display())),
+            "the fallback file is named by its path: {:?}",
+            xdg.stderr
         );
     });
 }
