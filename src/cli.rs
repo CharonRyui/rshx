@@ -15,7 +15,7 @@ pub enum CliCommand {
     ///
     /// `p` is the same subcommand.
     #[command(visible_alias = "p")]
-    Ping,
+    Ping(CliPingArgs),
 
     /// List the Hosts a run would select, without contacting any of them
     ///
@@ -78,6 +78,13 @@ pub struct CliOptions {
     /// When to colour the report.
     #[arg(long, value_enum, default_value_t = crate::report::ColorWhen::Auto, global = true)]
     pub color: crate::report::ColorWhen,
+}
+
+#[derive(Debug, Args)]
+pub struct CliPingArgs {
+    /// Message for ping to response
+    #[arg(short = 'm', long, value_name = "MESSAGE", default_value = "pong")]
+    pub message: String,
 }
 
 #[derive(Debug, Args)]

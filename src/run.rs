@@ -83,13 +83,13 @@ pub async fn execute(cli: &Cli) -> Result<u8> {
             execute_command(&selected, &command, detach, options, &mut reporter).await
         }
 
-        CliCommand::Ping => {
+        CliCommand::Ping(args) => {
             let mut reporter = reporter(options);
             // A ping is a run like any other: it names its command on the Host
             // too, so a Host cut short is stopped the same way.
             execute_command(
                 &selected,
-                &["echo".to_string(), "pong".to_string()],
+                &["echo".to_string(), args.message.to_owned()],
                 false,
                 options,
                 &mut reporter,
